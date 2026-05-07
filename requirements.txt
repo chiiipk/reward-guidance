@@ -1,0 +1,17 @@
+torch>=2.2
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pillow>=10.0
+tqdm>=4.65
+
+# FLUX text-to-image experiments only
+diffusers>=0.30
+transformers>=4.44
+accelerate>=0.30
+sentencepiece
+protobuf
+
+# ImageReward (the human-preference scorer used in some FLUX runs)
+image-reward
+openai-clip
