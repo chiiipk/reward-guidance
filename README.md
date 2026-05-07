@@ -1,6 +1,6 @@
-# Reward hacking in guided diffusion: experiment code
+# Are we really tilting?
 
-Code accompanying *"Are we really tilting? The mechanics of reward guidance in flow and diffusion models"*. The repository implements the plug-in (Doob *h*-transform) sampler, the reward damping schedule, best-of-*n* selection, and flow map reward guidance (FMRG), and contains the runnable scripts that produce every figure and table in the paper.
+Experiment code for the paper *"Are we really tilting? The mechanics of reward guidance in flow and diffusion models"*. The repository implements the plug-in (Doob *h*-transform) sampler, the reward damping schedule, best-of-*n* selection, and flow map reward guidance (FMRG), and contains the runnable scripts that produce every figure and table in the paper.
 
 The code is organized into four self-contained experiments:
 
