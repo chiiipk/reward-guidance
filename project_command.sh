@@ -500,7 +500,7 @@ for base in ['data', 'flux/results']:
     for root, dirs, files in os.walk(base):
         if 'bo4_raw' in root:
             continue
-        pngs = sorted([f for f in files if f.endswith('.png')])[:4]
+        pngs = sorted([f for f in files if f.endswith('.png')])[:3]
         if not pngs:
             continue
         dest = os.path.join(export_dir, root)
@@ -527,12 +527,12 @@ tar -czvf export_results.tar.gz "$EXPORT_DIR"/
 SIZE=$(du -sm export_results.tar.gz | cut -f1)
 echo ""
 echo "================================================================="
-echo "✅ HOÀN TẤT!"
+echo "HOÀN TẤT!"
 echo "   File: export_results.tar.gz ($SIZE MB)"
 if [ "$SIZE" -gt 25 ]; then
-    echo "   ⚠️  > 25MB — có thể cần giảm quality hoặc số ảnh"
+    echo "    > 25MB — có thể cần giảm quality hoặc số ảnh"
 else
-    echo "   ✅ < 25MB"
+    echo "   < 25MB"
 fi
 echo ""
 echo "   Nội dung:"
