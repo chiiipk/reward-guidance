@@ -28,7 +28,8 @@ dependencies = [
     "accelerate>=0.30",
     "sentencepiece",
     "protobuf",
-    "image-reward"
+    "image-reward",
+    "openai-clip"
 ]
 EOF
 
