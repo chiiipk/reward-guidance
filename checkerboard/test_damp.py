@@ -1,5 +1,5 @@
-import sys
-sys.path.append("/Users/skye/Documents/ICLR/reward-guidance")
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from checkerboard.sample import _posterior_var
 
 def _damped_lam(lam, t, sigma_data):

@@ -20,15 +20,14 @@ for ttf in (REPO / "assets" / "fonts").glob("*.ttf"):
 plt.style.use(str(REPO / "assets" / "default.mplstyle"))
 mpl.rcParams.update({
     "font.family": "sans-serif",
-    "font.sans-serif": ["Lato"],
+    "font.sans-serif": ["Lato", "DejaVu Sans"],
     "font.size": 18,
     "axes.labelsize": 19,
     "axes.titlesize": 19,
     "xtick.labelsize": 16,
     "ytick.labelsize": 16,
     "legend.fontsize": 16,
-    "text.usetex": True,
-    "text.latex.preamble": r"\usepackage[default]{lato} \usepackage{amsmath} \usepackage{amssymb}",
+    "text.usetex": False,
 })
 
 DISPLAY_N = 5000  # Subsample target for paper-figure scatter plots
