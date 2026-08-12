@@ -52,19 +52,28 @@ DEFAULT_FLUX_LORA_WEIGHT_NAME = (
 )
 
 
+
+def posterior_variance(sigma: float) -> float:
+    """Var[x_1 | x_t] = σ² / (σ² + (1−σ)²) for x_t = (1−σ)x_1 + σε."""
+    t_interp = 1.0 - sigma
+    num = sigma ** 2
+    den = num + t_interp ** 2 + 1e-12
+    return num / den
+
+assert abs(posterior_variance(1.0) - 1.0) < 1e-5
+assert posterior_variance(0.0) < 1e-5
+
 def damped_lambda_factor(sigma_t: float, sigma_damp: float,
                           lambda_eff: float) -> float:
-    """λ_t / λ = 1 / (1 + 2 λ σ²_{1|t}).
-
-    σ²_{1|t} = σ²(1−t)² / ((1−t)² + t²σ²) where t = interpolant time = 1 − σ_t.
-    Heavy damping near noise (σ_t → 1), no damping near data (σ_t → 0).
-    """
+    """λ_t / λ = 1 / (1 + 2 λ σ²_{1|t})."""
+    # Incorporate sigma_damp by scaling the variance
     t_interp = 1.0 - sigma_t
     s = sigma_damp
     num = s * s * (1.0 - t_interp) ** 2
     den = (1.0 - t_interp) ** 2 + t_interp ** 2 * s * s + 1e-12
     sigma_1t_sq = num / den
     return 1.0 / (1.0 + 2.0 * lambda_eff * sigma_1t_sq)
+
 
 
 def compute_b_coefficient(sigma: float, max_abs_b: float = 20.0,
@@ -235,20 +244,162 @@ class GuidedFluxPipeline(FluxPipeline):
                 pooled_prompt_embeds, text_ids, latent_image_ids, guidance,
             )
 
-            image = self._decode_packed(x0_hat, height, width).float()
+            image = self._decode_packed(x0_hat, height, width)
             reward = reward_fn(image)
             objective = (reward * reward_scale).sum()
             grad = torch.autograd.grad(objective, x_input,
                                         retain_graph=False)[0]
 
         raw_grad_norm = float(grad.norm().item())
-        if grad_divisor is not None:
-            grad = grad / grad_divisor
-        else:
+        if gradient_norm_scale is not None:
             grad_norm = grad.norm().clamp_min(1e-8)
             grad = grad / grad_norm * gradient_norm_scale
+        elif grad_divisor is not None:
+            grad = grad / grad_divisor
 
         return grad.detach(), float(reward.detach().mean().item()), raw_grad_norm
+
+
+    def _compute_grad_second_order(
+        self,
+        latents: torch.Tensor,
+        sigma_value: float,
+        sigma_next_value: float,
+        snr_factor: float,
+        reward_scale: float,
+        gradient_norm_scale: Optional[float],
+        height: int,
+        width: int,
+        reward_fn: Callable[[torch.Tensor], torch.Tensor],
+        prompt_embeds: torch.Tensor,
+        pooled_prompt_embeds: torch.Tensor,
+        text_ids: torch.Tensor,
+        latent_image_ids: torch.Tensor,
+        guidance: Optional[torch.Tensor],
+        generator: Optional[torch.Generator],
+        grad_divisor: Optional[float] = None,
+        lam: float = 1.0,
+        method: str = 'plugin',
+        k_eig: int = 16,
+    ) -> tuple[torch.Tensor, float, float]:
+        """Second-Order Woodbury Guidance: g_2nd = (I - c J_f^T H_g J_f)^{-1} g_1st."""
+        if not getattr(reward_fn, "supports_features", False):
+            raise ValueError("Second-order requires reward_fn with return_features=True.")
+
+        sqrt_l = math.sqrt(snr_factor)
+        sigma_prime = (sqrt_l * sigma_value) / (sqrt_l * sigma_value + 1.0 - sigma_value)
+        sigma_prime = min(sigma_prime, 0.9999)
+
+        alpha_t = 1.0 - sigma_value
+        alpha_prev = 1.0 - sigma_prime
+        var_t = sigma_value ** 2
+        var_prev = sigma_prime ** 2
+        scale = alpha_prev / max(alpha_t, 1e-8)
+        var_q = max(var_prev - scale ** 2 * var_t, 1e-8)
+        std_q = math.sqrt(var_q)
+
+        eps = torch.randn(
+            latents.shape, device=latents.device, dtype=latents.dtype,
+            generator=generator,
+        )
+
+        sigma_prime_t = torch.full(
+            (latents.shape[0],), sigma_prime,
+            device=latents.device, dtype=latents.dtype,
+        )
+
+        with torch.enable_grad():
+            x_input = latents.detach().requires_grad_(True)
+            z = scale * x_input + std_q * eps
+            x0_hat = self._flow_map_x0(
+                z, sigma_prime_t, prompt_embeds,
+                pooled_prompt_embeds, text_ids, latent_image_ids, guidance,
+            )
+
+            image = self._decode_packed(x0_hat, height, width)
+            score, z_feat, head_fn = reward_fn(image, return_features=True)
+            
+            assert latents.shape[0] == 1, "Second-order guidance currently only supports batch size 1"
+            def head_1d(z1d):
+                return head_fn(z1d.unsqueeze(0)).squeeze(0)
+            
+            from torch.func import hessian
+            H_g = hessian(head_1d)(z_feat[0])
+            
+            # eigh requires high precision to avoid numerical issues
+            evals, evecs = torch.linalg.eigh(H_g.double())
+            evals = evals.to(H_g.dtype)
+            evecs = evecs.to(H_g.dtype)
+            
+            g_feat = torch.autograd.grad(score.sum(), z_feat, retain_graph=True)[0]
+            
+            k = min(k_eig, H_g.shape[-1])
+            mu = evals[:k]
+            U = evecs[:, :k]
+            mask = mu < -1e-6
+            mu = mu[mask]
+            U = U[:, mask]
+            
+            W_cols = []
+            for j in range(U.shape[1]):
+                v = U[:, j].view_as(z_feat)
+                vjp = torch.autograd.grad(z_feat, x_input, grad_outputs=v, retain_graph=True)[0]
+                W_cols.append(vjp.view(-1))
+                
+            g_1st = torch.autograd.grad(z_feat, x_input, grad_outputs=g_feat, retain_graph=False)[0]
+            g_1st = g_1st * reward_scale * lam
+            
+            if len(W_cols) > 0:
+                W = torch.stack(W_cols, dim=1)
+                c = lam * posterior_variance(sigma_prime) * reward_scale
+                
+                print(f"k_eig={k_eig}  W cols={W.shape[1]}  c*||W||^2*|mu|={c * W.norm().item()**2 * mu.abs().max().item():.3e}")
+                
+                with torch.no_grad():
+                    M_inv = torch.diag(1.0 / mu).to(W.device)
+                    g_1st_flat = g_1st.flatten()
+                    
+                    if W.dtype == torch.bfloat16:
+                        W_math = W.to(torch.float32)
+                        K = -M_inv.to(torch.float32) / c + W_math.T @ W_math
+                        
+                        try:
+                            if torch.linalg.cond(K) > 1e10:
+                                print("Warning: K matrix condition number > 1e10. Woodbury correction might be unstable.")
+                        except:
+                            pass
+                            
+                        rhs = W_math.T @ g_1st_flat.to(torch.float32)
+                        sol = torch.linalg.solve(K, rhs)
+                        correction = (W_math @ sol).to(W.dtype)
+                    else:
+                        K = -M_inv / c + W.T @ W 
+                        
+                        try:
+                            if torch.linalg.cond(K) > 1e10:
+                                print("Warning: K matrix condition number > 1e10. Woodbury correction might be unstable.")
+                        except:
+                            pass
+                            
+                        rhs = W.T @ g_1st_flat
+                        sol = torch.linalg.solve(K, rhs)
+                        correction = W @ sol
+                        
+                g_2nd_flat = g_1st_flat - correction
+                g_2nd = g_2nd_flat.view_as(g_1st)
+            else:
+                g_2nd = g_1st
+            
+            raw_grad_norm = float(g_1st.norm().item())
+        if gradient_norm_scale is not None:
+            grad_norm = g_2nd.norm().clamp_min(1e-8)
+            grad = g_2nd / grad_norm * gradient_norm_scale
+        elif grad_divisor is not None:
+            grad = g_2nd / grad_divisor
+        else:
+            grad = g_2nd
+
+        return grad.detach(), float(score.detach().mean().item()), raw_grad_norm
 
     def _compute_grad_k_particles(
         self,
@@ -308,7 +459,7 @@ class GuidedFluxPipeline(FluxPipeline):
                     z, sigma_prime_t, prompt_embeds,
                     pooled_prompt_embeds, text_ids, latent_image_ids, guidance,
                 )
-                image = self._decode_packed(x0_hat, height, width).float()
+                image = self._decode_packed(x0_hat, height, width)
                 reward = reward_fn(image)
                 objective = (reward * reward_scale).sum()
                 grad = torch.autograd.grad(objective, x_input,
@@ -366,6 +517,7 @@ class GuidedFluxPipeline(FluxPipeline):
         sigma_damp: Optional[float] = None,
         num_particles: int = 1,
         lam: float = 1.0,
+        method: str = 'plugin',
         verbose: bool = False,
     ):
         height = height or self.default_sample_size * self.vae_scale_factor
@@ -477,7 +629,16 @@ class GuidedFluxPipeline(FluxPipeline):
                 ).to(latents.dtype)
 
             if is_guided_run and guidance_start_idx <= i < guidance_end_idx:
-                if num_particles > 1:
+                if method == "second_order":
+                    grad, r_val, raw_norm = self._compute_grad_second_order(
+                        latents, sigmas[i], sigmas[i + 1],
+                        snr_factor, reward_scale, gradient_norm_scale,
+                        height, width, reward_fn,
+                        prompt_embeds, pooled_prompt_embeds,
+                        text_ids, latent_image_ids, guidance, generator,
+                        grad_divisor, lam=lam,
+                    )
+                elif num_particles > 1:
                     grad, reward_value, raw_grad_norm = self._compute_grad_k_particles(
                         latents, sigma, snr_factor, reward_scale,
                         gradient_norm_scale, height, width, reward_fn,

@@ -154,6 +154,8 @@ def main(args):
             f"_snr{args.snr_factor}_steps{args.num_guidance_steps}"
             f"_start{args.guidance_start_step}",
         )
+    if args.method != "plugin":
+        cache_dir += f"_{args.method}"
     if args.sigma_damp is not None:
         cache_dir += f"_damp{args.sigma_damp:g}"
     if args.num_particles > 1:
@@ -181,6 +183,7 @@ def main(args):
             sigma_damp=args.sigma_damp,
             num_particles=args.num_particles,
             lam=args.lam,
+            method=args.method,
             verbose=args.verbose,
         )
         img = out.images[0]
@@ -231,6 +234,9 @@ if __name__ == "__main__":
     parser.add_argument("--reward-scale", type=float, default=1.0)
     parser.add_argument("--gradient-norm-scale", type=float, default=10.0,
                         help="L2 norm to which the gradient is rescaled.")
+    parser.add_argument("--method", type=str, default="plugin",
+                        choices=["plugin", "second_order"],
+                        help="Guidance method to use.")
     parser.add_argument("--snr-factor", type=float, default=5.0,
                         help="Renoising SNR factor (larger → smaller σ' shift).")
     parser.add_argument("--num-guidance-steps", type=int, default=5)
@@ -264,4 +270,6 @@ if __name__ == "__main__":
                         default="black-forest-labs/FLUX.1-dev")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+    if args.gradient_norm_scale <= 0.0:
+        args.gradient_norm_scale = None
     main(args)

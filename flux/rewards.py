@@ -102,13 +102,31 @@ def reward_rotation_invariant(image: torch.Tensor) -> torch.Tensor:
     return -((image - rotated) ** 2).mean(dim=(1, 2, 3))
 
 
-def reward_palette(image: torch.Tensor, palette_rgb) -> torch.Tensor:
-    """−‖mean(image color) − palette_rgb‖². palette_rgb is shape [3] in [0, 1]."""
-    if not torch.is_tensor(palette_rgb):
-        palette_rgb = torch.tensor(palette_rgb, dtype=image.dtype, device=image.device)
-    palette_rgb = palette_rgb.view(1, 3).to(device=image.device, dtype=image.dtype)
-    img_mean = image.mean(dim=(2, 3))
-    return -((img_mean - palette_rgb) ** 2).sum(dim=1)
+def make_palette_reward_fn(target_rgb: Union[str, list[float]]) -> Callable:
+    """Return a reward_fn that scores how close the image's mean RGB is to a target.
+
+    Can optionally return `(score, z, head_fn)` if `return_features=True` is passed,
+    where `z` is the Bx3 mean color and `head_fn` is the function mapping z to score.
+    """
+    if isinstance(target_rgb, str):
+        target_rgb = PALETTES[target_rgb]
+    
+    target_tensor = torch.tensor(target_rgb, dtype=torch.float32).view(1, 3)
+
+    def reward_fn(image: torch.Tensor, return_features: bool = False):
+        z = image.mean(dim=(2, 3))
+        
+        def head_fn(z_in):
+            t = target_tensor.to(z_in.device).to(z_in.dtype)
+            return -((z_in - t) ** 2).sum(dim=-1)
+            
+        score = head_fn(z)
+        if return_features:
+            return score, z, head_fn
+        return score
+        
+    reward_fn.supports_features = True
+    return reward_fn
 
 
 # Named palettes for convenience.
