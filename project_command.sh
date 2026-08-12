@@ -20,13 +20,19 @@ set -e
 EXPORT_DIR="export_results"
 FLUX_COMMON="--num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 --num-images 20"
 
-# Helper: chạy 1 condition cho 1 figure
+# Chỉ định chạy trên GPU 6 và 7
+export CUDA_VISIBLE_DEVICES="6,7"
+
+# Mảng chứa các lệnh chạy FLUX để sau đó phân bổ song song cho các GPU
+rm -f flux_commands.txt
+
+# Helper: lưu 1 condition cho 1 figure vào file thay vì chạy ngay
 run_flux() {
     local FIGURE=$1; shift
     local CONDITION=$1; shift
     local OUTDIR="../data/${FIGURE}/${CONDITION}"
-    echo "    [$FIGURE/$CONDITION]"
-    python sample.py "$@" --output-dir "$OUTDIR"
+    # Lưu command thành chuỗi để Python đọc và phân bổ GPU sau
+    echo "python sample.py $@ --output-dir $OUTDIR" >> flux_commands.txt
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -386,8 +392,6 @@ for LABEL_PROMPT_DAMP in \
     PROMPT=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f2)
     DAMP=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f3)
 
-    echo "  --- second_order: imagereward_${LABEL} ---"
-
     # 6a. Second-Order, GNS=50 (apple-to-apple with plugin GNS=50)
     run_flux "imagereward_${LABEL}" "2nd_order_gns50" \
         --reward imagereward --prompt "$PROMPT" --ir-prompt "$PROMPT" \
@@ -410,11 +414,61 @@ for LABEL_PROMPT_DAMP in \
         --num-images 80 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
         --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1
 
-    # Pick top 20
+done
+
+echo "  --- Đang chạy TẤT CẢ $(wc -l < flux_commands.txt | tr -d ' ') thí nghiệm FLUX song song trên các GPU ---"
+python3 << 'PYEOF'
+import subprocess, os, sys, threading
+from concurrent.futures import ThreadPoolExecutor
+
+def get_available_gpus():
+    env_gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if env_gpus:
+        # User specified GPUs like "6,7"
+        return [g.strip() for g in env_gpus.split(",") if g.strip()]
+    try:
+        # Fallback: get all GPUs
+        num = len(subprocess.check_output(['nvidia-smi', '-L']).decode('utf-8').strip().split('\n'))
+        return [str(i) for i in range(num)]
+    except:
+        return ["0"]
+
+available_gpus = get_available_gpus()
+num_gpus = len(available_gpus)
+print(f"  [Dispatcher] Tìm thấy {num_gpus} GPU ({','.join(available_gpus)}). Bắt đầu phân bổ lệnh...")
+
+with open('flux_commands.txt', 'r') as f:
+    commands = [line.strip() for line in f if line.strip()]
+
+gpu_lock = threading.Lock()
+
+def run_cmd(cmd):
+    with gpu_lock:
+        gpu_id = available_gpus.pop(0)
+    
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    print(f"  [GPU {gpu_id}] Đang chạy: {cmd.split('--output-dir ')[-1]}")
+    # Chạy ẩn output để console đỡ rối
+    subprocess.run(cmd, shell=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    
+    with gpu_lock:
+        available_gpus.append(gpu_id)
+
+with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+    executor.map(run_cmd, commands)
+PYEOF
+
+echo "  --- Hoàn thành chạy song song. Đang xử lý Bo4 ---"
+# Pick top 20 cho Bo4 sau khi tất cả ảnh đã gen xong
+for LABEL in "archaeologist" "miner" "market"; do
     python3 << PYEOF
 import os, shutil, numpy as np
 src = '../data/imagereward_${LABEL}/2nd_order_bo4_raw'
 dst = '../data/imagereward_${LABEL}/2nd_order_bo4'
+if not os.path.exists(src):
+    exit(0)
 os.makedirs(dst, exist_ok=True)
 rewards = np.load(os.path.join(src, 'rewards.npy'))
 top_idx = np.argsort(rewards)[-20:][::-1]
@@ -432,7 +486,6 @@ if os.path.exists(meta):
         f.write(f'\n--- Bo4 ---\norig={len(rewards)} sel=20 mean_sel={np.mean(top_r):+.4f} mean_all={np.mean(rewards):+.4f}\n')
 print(f'  Bo4 {src}: all={np.mean(rewards):+.4f} top20={np.mean(top_r):+.4f}')
 PYEOF
-
 done
 
 cd ..
