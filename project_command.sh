@@ -9,10 +9,14 @@ set -e
 #   2. Gaussian mixture (CPU, vài giây)
 #   3. Mode selection 1D (CPU, vài giây)
 #   4. Checkerboard: train + sample + figure (1 GPU, ~60 phút train)
-#   5. FLUX: baseline (unguided + plugin + plugin+damp)
-#   6. FLUX: second-order (ours)
-#   7. FLUX: second-order + Bo4 (ours)
+#   5. FLUX baselines: unguided + plugin + plugin+damp + plugin k=8
+#   6. FLUX second-order (ours) — apple-to-apple với baselines
+#   7. FLUX second-order + Bo4 (ours) — sinh 80 ảnh, pick top 20
 #   8. Tổng hợp kết quả → export_results/ (< 25MB)
+#
+# NOTE: Đây là ablation trên 1 prompt (archaeologist) + 1 reward (ImageReward)
+#       để so sánh apple-to-apple giữa second-order và baselines.
+#       Không phải full reproduction (9 figures × nhiều prompt/reward).
 #
 # Cách chạy:
 #   bash project_command.sh
@@ -22,7 +26,7 @@ set -e
 # ==============================================================================
 
 EXPORT_DIR="export_results"
-COMMON_FLUX_ARGS="--num-images 20 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5"
+COMMON_FLUX_ARGS="--num-images 20 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1"
 FLUX_PROMPT="a young archaeologist gently brushing dust from an ancient ceramic vase, soft museum lighting, intricate details, cinematic composition"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -97,11 +101,12 @@ echo "=== 4. Checkerboard ==="
 cd checkerboard/
 
 # 4a. Train velocity field (skip nếu checkpoint đã tồn tại)
+#     train.py default: --output-dir ./results → checkpoint tại results/velocity_net.pt
 if [ ! -f "results/velocity_net.pt" ]; then
     echo "  Training checkerboard velocity field (500k steps)..."
     python train.py --num-steps 500000
 else
-    echo "  Checkpoint đã tồn tại, bỏ qua training."
+    echo "  Checkpoint results/velocity_net.pt đã tồn tại, bỏ qua training."
 fi
 
 # 4b. Sample các conditions dùng trong paper (lambda=10)
@@ -122,21 +127,21 @@ python plot.py --bon-vs-softmax --lam 10.0
 cd ..
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. FLUX BASELINES: unguided + plugin + plugin+damp (ImageReward)
+# 5. FLUX BASELINES: unguided + plugin + plugin+damp + k=8 (ImageReward)
 #    Apple-to-apple so sánh với second-order
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 5. FLUX baselines (ImageReward) ==="
 cd flux/
 
-# 5a. Unguided
+# 5a. Unguided (reward-scale=0 overrides, no guidance at all)
 echo "  [5a] Unguided..."
 python sample.py \
     --reward imagereward \
     --prompt "$FLUX_PROMPT" \
     --ir-prompt "$FLUX_PROMPT" \
     --reward-scale 0 \
-    $COMMON_FLUX_ARGS \
+    --num-images 20 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
     --output-dir "./results/imagereward_unguided"
 
 # 5b. Plugin k=1, GNS=50
@@ -159,7 +164,7 @@ python sample.py \
     $COMMON_FLUX_ARGS \
     --output-dir "./results/imagereward_plugin_gns100"
 
-# 5d. Plugin k=1, GNS=100 + Damping
+# 5d. Plugin k=1, GNS=100 + Damping (σ=0.15, same as paper Table for archaeologist)
 echo "  [5d] Plugin k=1, GNS=100 + Damping 0.15..."
 python sample.py \
     --reward imagereward \
@@ -182,7 +187,7 @@ python sample.py \
     --output-dir "./results/imagereward_plugin_k8_gns50"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. FLUX SECOND-ORDER (OURS) — same reward, same prompt
+# 6. FLUX SECOND-ORDER (OURS) — same reward, same prompt, same hyperparams
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 6. FLUX Second-Order (ours) ==="
@@ -209,7 +214,7 @@ python sample.py \
     $COMMON_FLUX_ARGS \
     --output-dir "./results/imagereward_2nd_order_gns100"
 
-# 6c. Second-Order, Unnormalized (automatic damping)
+# 6c. Second-Order, Unnormalized (automatic damping from Woodbury)
 echo "  [6c] Second-Order, Unnormalized..."
 python sample.py \
     --reward imagereward \
@@ -222,7 +227,7 @@ python sample.py \
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 7. FLUX SECOND-ORDER + Bo4 (OURS)
-#    Sinh 80 ảnh, lấy top-20 theo reward
+#    Sinh 80 ảnh, lấy top-20 theo reward (best-of-4)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 7. FLUX Second-Order + Bo4 ==="
@@ -234,7 +239,47 @@ python sample.py \
     --method second_order \
     --gradient-norm-scale 50 \
     --num-images 80 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
-    --output-dir "./results/imagereward_2nd_order_bo4"
+    --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 \
+    --output-dir "./results/imagereward_2nd_order_bo4_raw"
+
+# Pick top-20 from 80 images based on saved rewards
+echo "  Selecting top 20 images from 80..."
+python3 -c "
+import os, shutil, numpy as np
+
+src = './results/imagereward_2nd_order_bo4_raw'
+dst = './results/imagereward_2nd_order_bo4'
+os.makedirs(dst, exist_ok=True)
+
+rewards = np.load(os.path.join(src, 'rewards.npy'))
+top_indices = np.argsort(rewards)[-20:][::-1]  # top 20, descending
+
+top_rewards = []
+for rank, idx in enumerate(top_indices):
+    src_img = os.path.join(src, f'{idx:04d}.png')
+    dst_img = os.path.join(dst, f'{rank:04d}.png')
+    if os.path.exists(src_img):
+        shutil.copy2(src_img, dst_img)
+    top_rewards.append(float(rewards[idx]))
+
+np.save(os.path.join(dst, 'rewards.npy'), np.array(top_rewards))
+
+# Copy metadata
+meta_src = os.path.join(src, 'metadata.txt')
+if os.path.exists(meta_src):
+    shutil.copy2(meta_src, os.path.join(dst, 'metadata.txt'))
+    with open(os.path.join(dst, 'metadata.txt'), 'a') as f:
+        f.write(f'\n--- Bo4 Selection ---\n')
+        f.write(f'original_n:             80\n')
+        f.write(f'selected_n:             20 (top by reward)\n')
+        f.write(f'mean_selected_reward:   {np.mean(top_rewards):+.4f}\n')
+        f.write(f'mean_all_reward:        {np.mean(rewards):+.4f}\n')
+
+print(f'Bo4 selection: {len(top_rewards)} images')
+print(f'  Mean reward (all 80):   {np.mean(rewards):+.4f}')
+print(f'  Mean reward (top 20):   {np.mean(top_rewards):+.4f}')
+print(f'  Max reward:             {np.max(top_rewards):+.4f}')
+"
 
 cd ..
 
@@ -245,7 +290,7 @@ echo ""
 echo "=== 8. Tổng hợp kết quả ==="
 
 # 8a. Tạo bảng reward summary
-python3 -c "
+python3 << 'PYEOF'
 import os, json, numpy as np
 
 summary = {}
@@ -265,18 +310,18 @@ for exp_dir in ['flux/results', 'checkerboard/results', 'mode_selection/results'
             }
 
 # Print table
-print(f'{\"Condition\":<60} {\"N\":>4} {\"Mean\":>8} {\"Std\":>8} {\"Max\":>8} {\"Min\":>8}')
+print(f'{"Condition":<60} {"N":>4} {"Mean":>8} {"Std":>8} {"Max":>8} {"Min":>8}')
 print('=' * 100)
 for k in sorted(summary):
     s = summary[k]
-    print(f'{k:<60} {s[\"n\"]:>4} {s[\"mean\"]:>+8.4f} {s[\"std\"]:>8.4f} {s[\"max\"]:>+8.4f} {s[\"min\"]:>+8.4f}')
+    print(f'{k:<60} {s["n"]:>4} {s["mean"]:>+8.4f} {s["std"]:>8.4f} {s["max"]:>+8.4f} {s["min"]:>+8.4f}')
 
 # Save JSON
 with open('reward_summary.json', 'w') as f:
     json.dump(summary, f, indent=2)
 print()
 print('Saved reward_summary.json')
-"
+PYEOF
 
 # 8b. Export kết quả
 rm -rf "$EXPORT_DIR"
@@ -287,6 +332,8 @@ for results_dir in flux/results checkerboard/results mode_selection/results; do
     if [ ! -d "$results_dir" ]; then continue; fi
     for sub in "$results_dir"/*/; do
         [ -d "$sub" ] || continue
+        # Skip the raw Bo4 dir (80 images, only keep the selected one)
+        case "$sub" in *bo4_raw*) continue ;; esac
         dest="$EXPORT_DIR/$sub"
         mkdir -p "$dest"
         # Copy file nhẹ: rewards, metadata, csv, npy
@@ -297,15 +344,17 @@ done
 
 # Copy ảnh FLUX (convert PNG → JPG 85% để giữ dung lượng nhỏ)
 # Chỉ lấy 4 ảnh đầu tiên mỗi condition để tiết kiệm
-python3 -c "
+python3 << 'PYEOF'
 import os
 from PIL import Image
 
-export_dir = '$EXPORT_DIR'
+export_dir = os.environ.get('EXPORT_DIR', 'export_results')
 for results_dir in ['flux/results']:
     if not os.path.isdir(results_dir):
         continue
     for sub in sorted(os.listdir(results_dir)):
+        if 'bo4_raw' in sub:
+            continue
         sub_path = os.path.join(results_dir, sub)
         if not os.path.isdir(sub_path):
             continue
@@ -316,7 +365,7 @@ for results_dir in ['flux/results']:
             img = Image.open(os.path.join(sub_path, f)).convert('RGB')
             img.save(os.path.join(dest, f.replace('.png', '.jpg')), 'JPEG', quality=85)
             print(f'  Exported: {sub}/{f} -> jpg')
-"
+PYEOF
 
 # Copy figures (PDF rất nhẹ)
 for fig_dir in figures gaussian_mixture mode_selection checkerboard; do
@@ -331,6 +380,7 @@ done
 cp reward_summary.json "$EXPORT_DIR/"
 
 # 8c. Nén
+export EXPORT_DIR
 tar -czvf export_results.tar.gz "$EXPORT_DIR"/
 
 # 8d. Kiểm tra dung lượng

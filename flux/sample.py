@@ -104,7 +104,11 @@ def build_reward_fn(args):
         text_input = get_imagereward_text_input(
             ir_model, args.ir_prompt or args.prompt, args.device
         )
-        return lambda image: reward_imagereward(image, text_input, ir_model)
+        def _ir_fn(image, return_features=False):
+            return reward_imagereward(image, text_input, ir_model,
+                                     return_features=return_features)
+        _ir_fn.supports_features = True
+        return _ir_fn
     if args.reward == "skywork":
         if not args.skywork_question:
             raise ValueError(

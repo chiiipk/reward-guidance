@@ -226,11 +226,17 @@ def get_imagereward_text_input(ir_model, prompt: str, device: str):
     ).to(device)
 
 
-def reward_imagereward(image: torch.Tensor, text_input, ir_model) -> torch.Tensor:
+def reward_imagereward(image: torch.Tensor, text_input, ir_model,
+                       return_features: bool = False):
     """Score images with ImageReward while keeping gradients.
 
     image_tensor → resize/normalize → blip.visual_encoder → blip.text_encoder
     (cross-attn on image_embeds) → mlp → scalar per batch element.
+
+    If return_features=True, returns (score, z_feat, head_fn) where:
+      - z_feat: [B, 768] CLS token embedding from BLIP text_encoder
+      - head_fn: callable z -> scalar, i.e. ir_model.mlp
+    This enables second-order guidance via Woodbury on the MLP head's Hessian.
     """
     img = F.interpolate(image, size=(224, 224), mode="bicubic",
                         align_corners=False, antialias=True)
@@ -257,7 +263,14 @@ def reward_imagereward(image: torch.Tensor, text_input, ir_model) -> torch.Tenso
         encoder_attention_mask=image_atts,
         return_dict=True,
     )
-    return ir_model.mlp(text_output.last_hidden_state[:, 0, :]).squeeze(-1)
+    z_feat = text_output.last_hidden_state[:, 0, :]  # [B, 768]
+    score = ir_model.mlp(z_feat).squeeze(-1)
+
+    if return_features:
+        def head_fn(z_in):
+            return ir_model.mlp(z_in).squeeze(-1)
+        return score, z_feat, head_fn
+    return score
 
 
 # ---------------------------------------------------------------------------
