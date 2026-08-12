@@ -2,43 +2,43 @@
 set -e
 
 # ==============================================================================
-# project_command.sh — Chạy TOÀN BỘ thí nghiệm trong paper
+# project_command.sh — Reproduce toàn bộ paper + so sánh second-order
 #
 # Bao gồm:
-#   1. Cài đặt môi trường bằng uv + pyproject.toml
-#   2. Gaussian mixture (CPU, vài giây)
-#   3. Mode selection 1D (CPU, vài giây)
-#   4. Checkerboard: train + sample + figure (1 GPU, ~60 phút train)
-#   5. FLUX baselines: unguided + plugin + plugin+damp + plugin k=8
-#   6. FLUX second-order (ours) — apple-to-apple với baselines
-#   7. FLUX second-order + Bo4 (ours) — sinh 80 ảnh, pick top 20
-#   8. Tổng hợp kết quả → export_results/ (< 25MB)
+#   1. Cài đặt môi trường
+#   2. Gaussian mixture (CPU)
+#   3. Mode selection 1D (CPU)
+#   4. Checkerboard: train + sample + figure (GPU, ~60 phút train)
+#   5. FLUX: tất cả 9 figure trong paper (GPU ≥ 48GB)
+#   6. FLUX second-order (ours) trên ImageReward — apple-to-apple
+#   7. Tổng hợp kết quả → export_results/ (< 25MB)
 #
-# NOTE: Đây là ablation trên 1 prompt (archaeologist) + 1 reward (ImageReward)
-#       để so sánh apple-to-apple giữa second-order và baselines.
-#       Không phải full reproduction (9 figures × nhiều prompt/reward).
-#
-# Cách chạy:
-#   bash project_command.sh
-#
-# Yêu cầu: GPU ≥ 48GB (H200/A6000/L40S), Python 3.10+
-# Cần đăng nhập HuggingFace trước: huggingface-cli login
+# Cách chạy:   bash project_command.sh
+# Yêu cầu:     GPU ≥ 48GB, Python 3.10+, huggingface-cli login
 # ==============================================================================
 
 EXPORT_DIR="export_results"
-COMMON_FLUX_ARGS="--num-images 20 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1"
-FLUX_PROMPT="a young archaeologist gently brushing dust from an ancient ceramic vase, soft museum lighting, intricate details, cinematic composition"
+FLUX_COMMON="--num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 --num-images 20"
+
+# Helper: chạy 1 condition cho 1 figure
+run_flux() {
+    local FIGURE=$1; shift
+    local CONDITION=$1; shift
+    local OUTDIR="../data/${FIGURE}/${CONDITION}"
+    echo "    [$FIGURE/$CONDITION]"
+    python sample.py "$@" --output-dir "$OUTDIR"
+}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. CÀI ĐẶT MÔI TRƯỜNG
 # ──────────────────────────────────────────────────────────────────────────────
-echo "=== 1. Tạo pyproject.toml và cài đặt môi trường ==="
+echo "=== 1. Cài đặt môi trường ==="
 
 cat << 'EOF' > pyproject.toml
 [project]
 name = "reward-guidance"
 version = "0.1.0"
-description = "Second-Order Reward Guidance — full paper reproduction"
+description = "Reward Guidance — full paper reproduction"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -60,17 +60,15 @@ dependencies = [
 EOF
 
 if ! command -v uv &> /dev/null; then
-    echo "Đang cài đặt uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
-
 uv venv
 source .venv/bin/activate
 uv pip install -r pyproject.toml
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. GAUSSIAN MIXTURE (CPU, ~10 giây)
+# 2. GAUSSIAN MIXTURE (CPU, ~10s)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 2. Gaussian mixture ==="
@@ -80,7 +78,7 @@ python make_fmrg_figure.py
 cd ..
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. MODE SELECTION 1D (CPU, ~10 giây)
+# 3. MODE SELECTION 1D (CPU, ~10s)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 3. Mode selection 1D ==="
@@ -94,312 +92,453 @@ python make_trajectory_figures.py
 cd ..
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. CHECKERBOARD: train + sample + figure (~60 phút train, vài phút sample)
+# 4. CHECKERBOARD (GPU, ~60 min train + vài phút sample)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 4. Checkerboard ==="
 cd checkerboard/
 
-# 4a. Train velocity field (skip nếu checkpoint đã tồn tại)
-#     train.py default: --output-dir ./results → checkpoint tại results/velocity_net.pt
 if [ ! -f "results/velocity_net.pt" ]; then
-    echo "  Training checkerboard velocity field (500k steps)..."
+    echo "  Training (500k steps)..."
     python train.py --num-steps 500000
 else
-    echo "  Checkpoint results/velocity_net.pt đã tồn tại, bỏ qua training."
+    echo "  Checkpoint đã tồn tại, skip training."
 fi
 
-# 4b. Sample các conditions dùng trong paper (lambda=10)
-echo "  Sampling: analytic tilt..."
 python sample.py --analytic-tilt --lam 10.0
-echo "  Sampling: plugin k=1..."
 python sample.py --k 1 --lam 10.0 --num-samples 20000
-echo "  Sampling: plugin k=8..."
 python sample.py --k 8 --lam 10.0 --num-samples 5000
-echo "  Sampling: plugin k=1 + damping..."
 python sample.py --k 1 --lam 10.0 --sigma-damp 0.2 --num-samples 20000
-
-# 4c. Render figures
-echo "  Rendering figures..."
 python make_main_figure.py
 python plot.py --bon-vs-softmax --lam 10.0
-
 cd ..
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. FLUX BASELINES: unguided + plugin + plugin+damp + k=8 (ImageReward)
-#    Apple-to-apple so sánh với second-order
+# 5. FLUX — TẤT CẢ 9 FIGURE TRONG PAPER
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "=== 5. FLUX baselines (ImageReward) ==="
+echo "=== 5. FLUX — Reproduce toàn bộ paper figures ==="
 cd flux/
 
-# 5a. Unguided (reward-scale=0 overrides, no guidance at all)
-echo "  [5a] Unguided..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --reward-scale 0 \
-    --num-images 20 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
-    --output-dir "./results/imagereward_unguided"
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: blueness_fox (appendix)
+# Reward: blue_minus_rg
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- blueness_fox ---"
+FOX_PROMPT="a baby fox wearing a cozy knitted sweater"
 
-# 5b. Plugin k=1, GNS=50
-echo "  [5b] Plugin k=1, GNS=50..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --gradient-norm-scale 50 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_plugin_gns50"
+run_flux blueness_fox unguided \
+    --reward blue_minus_rg --prompt "$FOX_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
 
-# 5c. Plugin k=1, GNS=100
-echo "  [5c] Plugin k=1, GNS=100..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --gradient-norm-scale 100 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_plugin_gns100"
+run_flux blueness_fox gns100 \
+    --reward blue_minus_rg --prompt "$FOX_PROMPT" \
+    --gradient-norm-scale 100 $FLUX_COMMON
 
-# 5d. Plugin k=1, GNS=100 + Damping (σ=0.15, same as paper Table for archaeologist)
-echo "  [5d] Plugin k=1, GNS=100 + Damping 0.15..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --gradient-norm-scale 100 \
-    --sigma-damp 0.15 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_plugin_gns100_damp"
+run_flux blueness_fox gns50 \
+    --reward blue_minus_rg --prompt "$FOX_PROMPT" \
+    --gradient-norm-scale 50 $FLUX_COMMON
 
-# 5e. Plugin k=8, GNS=50
-echo "  [5e] Plugin k=8, GNS=50..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --gradient-norm-scale 50 \
-    --num-particles 8 --lam 1.0 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_plugin_k8_gns50"
+run_flux blueness_fox gns50_k8 \
+    --reward blue_minus_rg --prompt "$FOX_PROMPT" \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux blueness_fox gns100_damp0.1 \
+    --reward blue_minus_rg --prompt "$FOX_PROMPT" \
+    --gradient-norm-scale 100 --sigma-damp 0.1 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: blueness_rococo (main text)
+# Reward: blue_minus_rg
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- blueness_rococo ---"
+ROCOCO_PROMPT="Artist painting in the center of a cluttered room lit by candlelight, rococo"
+
+run_flux blueness_rococo unguided \
+    --reward blue_minus_rg --prompt "$ROCOCO_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux blueness_rococo gns50 \
+    --reward blue_minus_rg --prompt "$ROCOCO_PROMPT" \
+    --gradient-norm-scale 50 $FLUX_COMMON
+
+run_flux blueness_rococo gns30 \
+    --reward blue_minus_rg --prompt "$ROCOCO_PROMPT" \
+    --gradient-norm-scale 30 $FLUX_COMMON
+
+run_flux blueness_rococo gns50_k8 \
+    --reward blue_minus_rg --prompt "$ROCOCO_PROMPT" \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux blueness_rococo gns100_damp0.1 \
+    --reward blue_minus_rg --prompt "$ROCOCO_PROMPT" \
+    --gradient-norm-scale 100 --sigma-damp 0.1 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: masked_brightness_welder (main text)
+# Reward: masked_brightness --mask-region topright_circle
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- masked_brightness_welder ---"
+WELDER_PROMPT="Photorealistic worm's-eye view of a welder mid-spark inside a rusted ship hull, sweat, smoke, orange backlight"
+
+run_flux masked_brightness_welder unguided \
+    --reward masked_brightness --mask-region topright_circle --prompt "$WELDER_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux masked_brightness_welder gns100 \
+    --reward masked_brightness --mask-region topright_circle --prompt "$WELDER_PROMPT" \
+    --gradient-norm-scale 100 $FLUX_COMMON
+
+run_flux masked_brightness_welder gns50 \
+    --reward masked_brightness --mask-region topright_circle --prompt "$WELDER_PROMPT" \
+    --gradient-norm-scale 50 $FLUX_COMMON
+
+run_flux masked_brightness_welder gns50_k8 \
+    --reward masked_brightness --mask-region topright_circle --prompt "$WELDER_PROMPT" \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux masked_brightness_welder gns100_damp0.1 \
+    --reward masked_brightness --mask-region topright_circle --prompt "$WELDER_PROMPT" \
+    --gradient-norm-scale 100 --sigma-damp 0.1 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: imagereward_archaeologist
+# Reward: imagereward, damp σ=0.15
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- imagereward_archaeologist ---"
+ARCH_PROMPT="a young archaeologist gently brushing dust from an ancient ceramic vase, soft museum lighting, intricate details, cinematic composition"
+
+run_flux imagereward_archaeologist unguided \
+    --reward imagereward --prompt "$ARCH_PROMPT" --ir-prompt "$ARCH_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux imagereward_archaeologist gns100 \
+    --reward imagereward --prompt "$ARCH_PROMPT" --ir-prompt "$ARCH_PROMPT" \
+    --gradient-norm-scale 100 $FLUX_COMMON
+
+run_flux imagereward_archaeologist gns50 \
+    --reward imagereward --prompt "$ARCH_PROMPT" --ir-prompt "$ARCH_PROMPT" \
+    --gradient-norm-scale 50 $FLUX_COMMON
+
+run_flux imagereward_archaeologist gns50_k8 \
+    --reward imagereward --prompt "$ARCH_PROMPT" --ir-prompt "$ARCH_PROMPT" \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux imagereward_archaeologist gns100_damp0.15 \
+    --reward imagereward --prompt "$ARCH_PROMPT" --ir-prompt "$ARCH_PROMPT" \
+    --gradient-norm-scale 100 --sigma-damp 0.15 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: imagereward_miner
+# Reward: imagereward, damp σ=0.10
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- imagereward_miner ---"
+MINER_PROMPT="a coal miner pausing for a moment underground, hard hat lamp glowing, dust in the air, painterly chiaroscuro"
+
+run_flux imagereward_miner unguided \
+    --reward imagereward --prompt "$MINER_PROMPT" --ir-prompt "$MINER_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux imagereward_miner gns100 \
+    --reward imagereward --prompt "$MINER_PROMPT" --ir-prompt "$MINER_PROMPT" \
+    --gradient-norm-scale 100 $FLUX_COMMON
+
+run_flux imagereward_miner gns50 \
+    --reward imagereward --prompt "$MINER_PROMPT" --ir-prompt "$MINER_PROMPT" \
+    --gradient-norm-scale 50 $FLUX_COMMON
+
+run_flux imagereward_miner gns50_k8 \
+    --reward imagereward --prompt "$MINER_PROMPT" --ir-prompt "$MINER_PROMPT" \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux imagereward_miner gns100_damp0.10 \
+    --reward imagereward --prompt "$MINER_PROMPT" --ir-prompt "$MINER_PROMPT" \
+    --gradient-norm-scale 100 --sigma-damp 0.10 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: imagereward_market
+# Reward: imagereward, damp σ=0.05
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- imagereward_market ---"
+MARKET_PROMPT="a vibrant Indian outdoor market with colorful stalls and produce"
+
+run_flux imagereward_market unguided \
+    --reward imagereward --prompt "$MARKET_PROMPT" --ir-prompt "$MARKET_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux imagereward_market gns50 \
+    --reward imagereward --prompt "$MARKET_PROMPT" --ir-prompt "$MARKET_PROMPT" \
+    --gradient-norm-scale 50 $FLUX_COMMON
+
+run_flux imagereward_market gns30 \
+    --reward imagereward --prompt "$MARKET_PROMPT" --ir-prompt "$MARKET_PROMPT" \
+    --gradient-norm-scale 30 $FLUX_COMMON
+
+run_flux imagereward_market gns50_k8 \
+    --reward imagereward --prompt "$MARKET_PROMPT" --ir-prompt "$MARKET_PROMPT" \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux imagereward_market gns100_damp0.05 \
+    --reward imagereward --prompt "$MARKET_PROMPT" --ir-prompt "$MARKET_PROMPT" \
+    --gradient-norm-scale 100 --sigma-damp 0.05 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: vlm_diner_eclipse
+# Reward: skywork (Qwen2.5-VL-3B)
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- vlm_diner_eclipse ---"
+DINER_PROMPT="A roadside American diner in the Nevada desert, shot at twilight, a neon sign on the roof glowing ECLIPSE DINER in cherry-red and cream tubes, a long empty highway behind it, painterly warm light on chrome surfaces"
+DINER_Q="Does this image clearly show a neon sign with the word 'ECLIPSE' as the main readable text? Answer Yes or No."
+
+run_flux vlm_diner_eclipse unguided \
+    --reward skywork --prompt "$DINER_PROMPT" \
+    --skywork-question "$DINER_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux vlm_diner_eclipse gns100 \
+    --reward skywork --prompt "$DINER_PROMPT" \
+    --skywork-question "$DINER_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --gradient-norm-scale 100 $FLUX_COMMON
+
+run_flux vlm_diner_eclipse gns50_k8 \
+    --reward skywork --prompt "$DINER_PROMPT" \
+    --skywork-question "$DINER_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux vlm_diner_eclipse gns100_damp0.1 \
+    --reward skywork --prompt "$DINER_PROMPT" \
+    --skywork-question "$DINER_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --gradient-norm-scale 100 --sigma-damp 0.1 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: vlm_subway_mars
+# Reward: skywork (Qwen2.5-VL-3B)
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- vlm_subway_mars ---"
+SUBWAY_PROMPT="cyberpunk subway platform with a holographic display that says NEXT TRAIN MARS, teal neon, commuters in silhouette"
+SUBWAY_Q="Does this image clearly show a display with the text 'NEXT TRAIN MARS' as the main readable text? Answer Yes or No."
+
+run_flux vlm_subway_mars unguided \
+    --reward skywork --prompt "$SUBWAY_PROMPT" \
+    --skywork-question "$SUBWAY_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux vlm_subway_mars gns100 \
+    --reward skywork --prompt "$SUBWAY_PROMPT" \
+    --skywork-question "$SUBWAY_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --gradient-norm-scale 100 $FLUX_COMMON
+
+run_flux vlm_subway_mars gns50_k8 \
+    --reward skywork --prompt "$SUBWAY_PROMPT" \
+    --skywork-question "$SUBWAY_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --gradient-norm-scale 50 --num-particles 8 --lam 1.0 $FLUX_COMMON
+
+run_flux vlm_subway_mars gns100_damp0.1 \
+    --reward skywork --prompt "$SUBWAY_PROMPT" \
+    --skywork-question "$SUBWAY_Q" --skywork-model-id Qwen/Qwen2.5-VL-3B-Instruct \
+    --gradient-norm-scale 100 --sigma-damp 0.1 $FLUX_COMMON
+
+# ═══════════════════════════════════════════════════════════════════════
+# Figure: fmrg_blueness_dragon (appendix)
+# Reward: blue_minus_rg — so sánh plugin vs FMRG
+# ═══════════════════════════════════════════════════════════════════════
+echo "  --- fmrg_blueness_dragon ---"
+DRAGON_PROMPT="a massive dragon perched on basalt cliffs above lava waterfalls, volcanic ash, crimson sunset, ultra-detailed fantasy"
+
+run_flux fmrg_blueness_dragon dragon_unguided \
+    --reward blue_minus_rg --prompt "$DRAGON_PROMPT" \
+    --reward-scale 0 $FLUX_COMMON
+
+run_flux fmrg_blueness_dragon dragon_plugin \
+    --reward blue_minus_rg --prompt "$DRAGON_PROMPT" \
+    --gradient-norm-scale 50 --snr-factor 5 \
+    --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
+    --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 --num-images 20
+
+run_flux fmrg_blueness_dragon dragon_fmrg \
+    --reward blue_minus_rg --prompt "$DRAGON_PROMPT" \
+    --gradient-norm-scale 50 --snr-factor 1 \
+    --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
+    --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 --num-images 20
+
+# Render tất cả figures
+echo "  --- Rendering all figures ---"
+for fig in ../figures/*/; do
+    if [ -f "$fig/regenerate.py" ]; then
+        echo "    Rendering $(basename $fig)..."
+        (cd "$fig" && python regenerate.py) || echo "    WARNING: $(basename $fig) failed"
+    fi
+done
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. FLUX SECOND-ORDER (OURS) — same reward, same prompt, same hyperparams
+# 6. FLUX SECOND-ORDER (OURS) — apple-to-apple trên 3 prompt ImageReward
+#    Chỉ ImageReward hỗ trợ second-order (cần supports_features)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 6. FLUX Second-Order (ours) ==="
 
-# 6a. Second-Order, GNS=50 (apple-to-apple with plugin GNS=50)
-echo "  [6a] Second-Order, GNS=50..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --method second_order \
-    --gradient-norm-scale 50 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_2nd_order_gns50"
+for LABEL_PROMPT_DAMP in \
+    "archaeologist|$ARCH_PROMPT|0.15" \
+    "miner|$MINER_PROMPT|0.10" \
+    "market|$MARKET_PROMPT|0.05"; do
 
-# 6b. Second-Order, GNS=100
-echo "  [6b] Second-Order, GNS=100..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --method second_order \
-    --gradient-norm-scale 100 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_2nd_order_gns100"
+    LABEL=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f1)
+    PROMPT=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f2)
+    DAMP=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f3)
 
-# 6c. Second-Order, Unnormalized (automatic damping from Woodbury)
-echo "  [6c] Second-Order, Unnormalized..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --method second_order \
-    --gradient-norm-scale 0.0 \
-    $COMMON_FLUX_ARGS \
-    --output-dir "./results/imagereward_2nd_order_unnorm"
+    echo "  --- second_order: imagereward_${LABEL} ---"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 7. FLUX SECOND-ORDER + Bo4 (OURS)
-#    Sinh 80 ảnh, lấy top-20 theo reward (best-of-4)
-# ──────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "=== 7. FLUX Second-Order + Bo4 ==="
-echo "  [7] Second-Order + Bo4 (80 images, pick top 20)..."
-python sample.py \
-    --reward imagereward \
-    --prompt "$FLUX_PROMPT" \
-    --ir-prompt "$FLUX_PROMPT" \
-    --method second_order \
-    --gradient-norm-scale 50 \
-    --num-images 80 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
-    --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 \
-    --output-dir "./results/imagereward_2nd_order_bo4_raw"
+    # 6a. Second-Order, GNS=50 (apple-to-apple with plugin GNS=50)
+    run_flux "imagereward_${LABEL}" "2nd_order_gns50" \
+        --reward imagereward --prompt "$PROMPT" --ir-prompt "$PROMPT" \
+        --method second_order --gradient-norm-scale 50 $FLUX_COMMON
 
-# Pick top-20 from 80 images based on saved rewards
-echo "  Selecting top 20 images from 80..."
-python3 -c "
+    # 6b. Second-Order, GNS=100
+    run_flux "imagereward_${LABEL}" "2nd_order_gns100" \
+        --reward imagereward --prompt "$PROMPT" --ir-prompt "$PROMPT" \
+        --method second_order --gradient-norm-scale 100 $FLUX_COMMON
+
+    # 6c. Second-Order, Unnormalized (automatic Woodbury damping)
+    run_flux "imagereward_${LABEL}" "2nd_order_unnorm" \
+        --reward imagereward --prompt "$PROMPT" --ir-prompt "$PROMPT" \
+        --method second_order --gradient-norm-scale 0.0 $FLUX_COMMON
+
+    # 6d. Second-Order + Bo4: sinh 80 ảnh, pick top 20
+    run_flux "imagereward_${LABEL}" "2nd_order_bo4_raw" \
+        --reward imagereward --prompt "$PROMPT" --ir-prompt "$PROMPT" \
+        --method second_order --gradient-norm-scale 50 \
+        --num-images 80 --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
+        --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1
+
+    # Pick top 20
+    python3 << PYEOF
 import os, shutil, numpy as np
-
-src = './results/imagereward_2nd_order_bo4_raw'
-dst = './results/imagereward_2nd_order_bo4'
+src = '../data/imagereward_${LABEL}/2nd_order_bo4_raw'
+dst = '../data/imagereward_${LABEL}/2nd_order_bo4'
 os.makedirs(dst, exist_ok=True)
-
 rewards = np.load(os.path.join(src, 'rewards.npy'))
-top_indices = np.argsort(rewards)[-20:][::-1]  # top 20, descending
-
-top_rewards = []
-for rank, idx in enumerate(top_indices):
-    src_img = os.path.join(src, f'{idx:04d}.png')
-    dst_img = os.path.join(dst, f'{rank:04d}.png')
-    if os.path.exists(src_img):
-        shutil.copy2(src_img, dst_img)
-    top_rewards.append(float(rewards[idx]))
-
-np.save(os.path.join(dst, 'rewards.npy'), np.array(top_rewards))
-
-# Copy metadata
-meta_src = os.path.join(src, 'metadata.txt')
-if os.path.exists(meta_src):
-    shutil.copy2(meta_src, os.path.join(dst, 'metadata.txt'))
+top_idx = np.argsort(rewards)[-20:][::-1]
+top_r = []
+for rank, idx in enumerate(top_idx):
+    s = os.path.join(src, f'{idx:04d}.png')
+    d = os.path.join(dst, f'{rank:04d}.png')
+    if os.path.exists(s): shutil.copy2(s, d)
+    top_r.append(float(rewards[idx]))
+np.save(os.path.join(dst, 'rewards.npy'), np.array(top_r))
+meta = os.path.join(src, 'metadata.txt')
+if os.path.exists(meta):
+    shutil.copy2(meta, os.path.join(dst, 'metadata.txt'))
     with open(os.path.join(dst, 'metadata.txt'), 'a') as f:
-        f.write(f'\n--- Bo4 Selection ---\n')
-        f.write(f'original_n:             80\n')
-        f.write(f'selected_n:             20 (top by reward)\n')
-        f.write(f'mean_selected_reward:   {np.mean(top_rewards):+.4f}\n')
-        f.write(f'mean_all_reward:        {np.mean(rewards):+.4f}\n')
+        f.write(f'\n--- Bo4 ---\norig={len(rewards)} sel=20 mean_sel={np.mean(top_r):+.4f} mean_all={np.mean(rewards):+.4f}\n')
+print(f'  Bo4 {src}: all={np.mean(rewards):+.4f} top20={np.mean(top_r):+.4f}')
+PYEOF
 
-print(f'Bo4 selection: {len(top_rewards)} images')
-print(f'  Mean reward (all 80):   {np.mean(rewards):+.4f}')
-print(f'  Mean reward (top 20):   {np.mean(top_rewards):+.4f}')
-print(f'  Max reward:             {np.max(top_rewards):+.4f}')
-"
+done
 
 cd ..
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 8. TỔNG HỢP KẾT QUẢ
+# 7. TỔNG HỢP KẾT QUẢ
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "=== 8. Tổng hợp kết quả ==="
+echo "=== 7. Tổng hợp kết quả ==="
 
-# 8a. Tạo bảng reward summary
+# 7a. Bảng reward summary
 python3 << 'PYEOF'
 import os, json, numpy as np
 
 summary = {}
-for exp_dir in ['flux/results', 'checkerboard/results', 'mode_selection/results']:
-    if not os.path.isdir(exp_dir):
+for base in ['data', 'flux/results', 'checkerboard/results', 'mode_selection/results']:
+    if not os.path.isdir(base):
         continue
-    for sub in sorted(os.listdir(exp_dir)):
-        reward_path = os.path.join(exp_dir, sub, 'rewards.npy')
-        if os.path.isfile(reward_path):
-            r = np.load(reward_path)
-            summary[f'{exp_dir}/{sub}'] = {
-                'mean': float(np.mean(r)),
-                'std': float(np.std(r)),
-                'max': float(np.max(r)),
-                'min': float(np.min(r)),
+    for root, dirs, files in os.walk(base):
+        if 'rewards.npy' in files and 'bo4_raw' not in root:
+            r = np.load(os.path.join(root, 'rewards.npy'))
+            key = root.replace('\\', '/')
+            summary[key] = {
+                'mean': float(np.mean(r)), 'std': float(np.std(r)),
+                'max': float(np.max(r)), 'min': float(np.min(r)),
                 'n': int(len(r)),
             }
 
-# Print table
-print(f'{"Condition":<60} {"N":>4} {"Mean":>8} {"Std":>8} {"Max":>8} {"Min":>8}')
-print('=' * 100)
+print(f'{"Condition":<70} {"N":>4} {"Mean":>8} {"Std":>8} {"Max":>8} {"Min":>8}')
+print('=' * 110)
 for k in sorted(summary):
     s = summary[k]
-    print(f'{k:<60} {s["n"]:>4} {s["mean"]:>+8.4f} {s["std"]:>8.4f} {s["max"]:>+8.4f} {s["min"]:>+8.4f}')
+    print(f'{k:<70} {s["n"]:>4} {s["mean"]:>+8.4f} {s["std"]:>8.4f} {s["max"]:>+8.4f} {s["min"]:>+8.4f}')
 
-# Save JSON
 with open('reward_summary.json', 'w') as f:
     json.dump(summary, f, indent=2)
-print()
-print('Saved reward_summary.json')
+print('\nSaved reward_summary.json')
 PYEOF
 
-# 8b. Export kết quả
+# 7b. Export
 rm -rf "$EXPORT_DIR"
 mkdir -p "$EXPORT_DIR"
 
-# Copy rewards.npy + metadata.txt (rất nhẹ) cho mọi thí nghiệm
-for results_dir in flux/results checkerboard/results mode_selection/results; do
-    if [ ! -d "$results_dir" ]; then continue; fi
-    for sub in "$results_dir"/*/; do
-        [ -d "$sub" ] || continue
-        # Skip the raw Bo4 dir (80 images, only keep the selected one)
-        case "$sub" in *bo4_raw*) continue ;; esac
-        dest="$EXPORT_DIR/$sub"
+# Copy rewards.npy + metadata.txt cho mọi thí nghiệm (skip bo4_raw)
+for base in data flux/results checkerboard/results mode_selection/results; do
+    [ -d "$base" ] || continue
+    find "$base" -name 'rewards.npy' -not -path '*bo4_raw*' | while read f; do
+        d=$(dirname "$f")
+        dest="$EXPORT_DIR/$d"
         mkdir -p "$dest"
-        # Copy file nhẹ: rewards, metadata, csv, npy
-        find "$sub" -maxdepth 1 \( -name "*.npy" -o -name "*.txt" -o -name "*.csv" -o -name "*.json" \) \
-            -exec cp {} "$dest/" \;
+        cp "$d"/rewards.npy "$dest/" 2>/dev/null || true
+        cp "$d"/metadata.txt "$dest/" 2>/dev/null || true
     done
 done
 
-# Copy ảnh FLUX (convert PNG → JPG 85% để giữ dung lượng nhỏ)
-# Chỉ lấy 4 ảnh đầu tiên mỗi condition để tiết kiệm
+# Copy 4 ảnh mẫu mỗi condition (PNG → JPG 85%)
 python3 << 'PYEOF'
 import os
 from PIL import Image
 
-export_dir = os.environ.get('EXPORT_DIR', 'export_results')
-for results_dir in ['flux/results']:
-    if not os.path.isdir(results_dir):
+export_dir = 'export_results'
+for base in ['data', 'flux/results']:
+    if not os.path.isdir(base):
         continue
-    for sub in sorted(os.listdir(results_dir)):
-        if 'bo4_raw' in sub:
+    for root, dirs, files in os.walk(base):
+        if 'bo4_raw' in root:
             continue
-        sub_path = os.path.join(results_dir, sub)
-        if not os.path.isdir(sub_path):
+        pngs = sorted([f for f in files if f.endswith('.png')])[:4]
+        if not pngs:
             continue
-        dest = os.path.join(export_dir, results_dir, sub)
+        dest = os.path.join(export_dir, root)
         os.makedirs(dest, exist_ok=True)
-        pngs = sorted([f for f in os.listdir(sub_path) if f.endswith('.png')])[:4]
         for f in pngs:
-            img = Image.open(os.path.join(sub_path, f)).convert('RGB')
+            img = Image.open(os.path.join(root, f)).convert('RGB')
             img.save(os.path.join(dest, f.replace('.png', '.jpg')), 'JPEG', quality=85)
-            print(f'  Exported: {sub}/{f} -> jpg')
 PYEOF
 
-# Copy figures (PDF rất nhẹ)
+# Copy figures (PDF/PNG)
 for fig_dir in figures gaussian_mixture mode_selection checkerboard; do
     if [ -d "$fig_dir/figures" ]; then
         mkdir -p "$EXPORT_DIR/$fig_dir/figures"
-        find "$fig_dir/figures" -name "*.pdf" -exec cp {} "$EXPORT_DIR/$fig_dir/figures/" \;
-        find "$fig_dir/figures" -name "*.png" -exec cp {} "$EXPORT_DIR/$fig_dir/figures/" \;
+        find "$fig_dir/figures" \( -name "*.pdf" -o -name "*.png" \) \
+            -exec cp {} "$EXPORT_DIR/$fig_dir/figures/" \;
     fi
 done
 
-# Copy reward summary
 cp reward_summary.json "$EXPORT_DIR/"
 
-# 8c. Nén
-export EXPORT_DIR
+# Nén
 tar -czvf export_results.tar.gz "$EXPORT_DIR"/
 
-# 8d. Kiểm tra dung lượng
 SIZE=$(du -sm export_results.tar.gz | cut -f1)
 echo ""
 echo "================================================================="
 echo "✅ HOÀN TẤT!"
-echo "   File kết quả: export_results.tar.gz ($SIZE MB)"
+echo "   File: export_results.tar.gz ($SIZE MB)"
 if [ "$SIZE" -gt 25 ]; then
-    echo "   ⚠️  Dung lượng > 25MB. Giảm số ảnh export hoặc chất lượng JPG."
+    echo "   ⚠️  > 25MB — có thể cần giảm quality hoặc số ảnh"
 else
-    echo "   ✅ Dung lượng OK (< 25MB)"
+    echo "   ✅ < 25MB"
 fi
 echo ""
 echo "   Nội dung:"
-echo "   - reward_summary.json: bảng tổng hợp mean/std/max reward mọi condition"
-echo "   - flux/results/*/: rewards.npy + metadata.txt + 4 ảnh sample (JPG)"
-echo "   - checkerboard/results/: sampling outputs"
-echo "   - figures/: PDF figures cho Gaussian mixture, mode selection, checkerboard"
-echo ""
-echo "   👉 Kéo file export_results.tar.gz về máy để phân tích!"
+echo "   - reward_summary.json"
+echo "   - data/*/: 9 paper figures × tất cả conditions"
+echo "   - data/imagereward_*/2nd_order_*: second-order (ours)"
+echo "   - checkerboard/results/"
+echo "   - figures/: rendered PDF"
 echo "================================================================="
