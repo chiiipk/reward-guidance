@@ -90,9 +90,9 @@ echo ""
 echo "=== 3. Mode selection 1D ==="
 cd mode_selection/
 python sample.py --reward step     --num-samples 2000 --max-n 16 --lam 5.0 \
-    --record-trajectories --output-dir results/step_lam5.0
+    --record-trajectories --output-dir results
 python sample.py --reward gaussian --num-samples 2000 --max-n 16 --lam 5.0 \
-    --record-trajectories --output-dir results/gaussian_lam5.0
+    --record-trajectories --output-dir results
 python make_overview_figure.py
 python make_trajectory_figures.py
 cd ..
