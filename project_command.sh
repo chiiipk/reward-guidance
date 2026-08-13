@@ -43,15 +43,14 @@ run_flux() {
 # 1. CÀI ĐẶT MÔI TRƯỜNG
 # ──────────────────────────────────────────────────────────────────────────────
 echo "=== 1. Cài đặt môi trường ==="
-if ! command -v python >/dev/null 2>&1; then
-    echo "Không tìm thấy Python trong môi trường hiện tại." >&2
-    echo "Hãy tạo virtual environment và chạy: pip install -r requirements.txt" >&2
+if ! command -v uv >/dev/null 2>&1; then
+    echo "Không tìm thấy uv." >&2
+    echo "Cài uv tại https://docs.astral.sh/uv/getting-started/installation/" >&2
     exit 1
 fi
-python -c "import diffusers, torch, transformers" || {
-    echo "Thiếu dependency. Chạy: pip install -r requirements.txt" >&2
-    exit 1
-}
+uv sync --frozen
+source .venv/bin/activate
+python -c "import diffusers, torch, transformers"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. GAUSSIAN MIXTURE (CPU, ~10s)

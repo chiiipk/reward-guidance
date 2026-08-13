@@ -10,14 +10,17 @@ Tài liệu này chứa các hướng dẫn chi tiết để thiết lập môi 
 
 ## 1. Thiết lập môi trường
 
-Chạy từ **root của repository** (không chạy `pip install -r requirements.txt`
-sau khi đã `cd flux`, vì file requirements nằm ở root). Yêu cầu Python 3.10+:
+Chạy từ **root của repository**. Yêu cầu Python 3.10–3.12; khuyến nghị
+Python 3.11:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh  # bỏ qua nếu đã có uv
+uv sync
+source .venv/bin/activate
 ```
+
+Không dùng `pip install -r requirements.txt`: dependency được quản lý tập trung
+trong `pyproject.toml`, còn `uv.lock` cố định phiên bản giữa máy local và H200.
 
 Đăng nhập Hugging Face trước khi tải FLUX.1-dev:
 

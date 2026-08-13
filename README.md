@@ -18,10 +18,13 @@ Each experiment has its own `sample.py` for generating samples and one or more f
 ## Setup
 
 ```bash
-conda create -n reward-hacking python=3.11
-conda activate reward-hacking
-pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh  # skip if uv is installed
+uv sync
+source .venv/bin/activate
 ```
+
+`uv sync` creates `.venv` and installs the exact environment described by
+`pyproject.toml` and `uv.lock`. Use Python 3.10–3.12; Python 3.11 is recommended.
 
 The Gaussian-mixture, checkerboard, and 1D mode-selection experiments run on CPU or a single small GPU. The FLUX experiments require a single GPU with at least 48 GB of memory (we used an NVIDIA RTX A6000 or L40S); 24 GB is not sufficient even with gradient checkpointing.
 
@@ -81,7 +84,8 @@ The FLUX commands are repetitive across conditions, so each figure folder under 
 ```
 release/
 ├── README.md
-├── requirements.txt
+├── pyproject.toml                    # dependency source for uv
+├── uv.lock                           # reproducible resolved environment
 ├── assets/
 │   ├── default.mplstyle              # used by sample/plot scripts
 │   ├── paper.mplstyle                # used by paper-quality figure scripts

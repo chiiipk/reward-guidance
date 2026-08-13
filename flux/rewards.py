@@ -149,19 +149,19 @@ PALETTES = {
 
 
 def _shim_imagereward_imports():
-    """Patch transformers/BLIP API mismatches that prevent ImageReward from
-    loading on newer transformers (5.x).
+    """Patch Transformers/BLIP API mismatches before importing ImageReward.
 
-    1. `transformers.pytorch_utils.find_pruneable_heads_and_indices` was
-       removed; ImageReward's BLIP imports it. Stub.
+    1. ImageReward imports pruning/chunking helpers from `modeling_utils`, but
+       Transformers 4.57 moved them to `pytorch_utils`.
     2. BLIP's `init_tokenizer` reads
        `tokenizer.additional_special_tokens_ids[0]`, which returns an empty
-       list under transformers 5.x. Replace `init_tokenizer` itself with a
+       list under newer Transformers. Replace `init_tokenizer` itself with a
        version that uses `convert_tokens_to_ids('[ENC]')` directly. We patch
        both the source module (`blip`) AND the consumer module
        (`blip_pretrain`, which does `from .blip import init_tokenizer` at
        import time and would otherwise keep the old reference).
     """
+    import transformers.modeling_utils as tmu
     import transformers.pytorch_utils as tpu
 
     if not hasattr(tpu, "find_pruneable_heads_and_indices"):
@@ -170,6 +170,14 @@ def _shim_imagereward_imports():
             return set(), torch.tensor([], dtype=torch.long)
 
         tpu.find_pruneable_heads_and_indices = _stub
+
+    for helper in (
+        "apply_chunking_to_forward",
+        "find_pruneable_heads_and_indices",
+        "prune_linear_layer",
+    ):
+        if not hasattr(tmu, helper) and hasattr(tpu, helper):
+            setattr(tmu, helper, getattr(tpu, helper))
 
     import ImageReward.models.BLIP.blip as _b
     import ImageReward.models.BLIP.blip_pretrain as _bp
