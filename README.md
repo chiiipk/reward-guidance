@@ -64,7 +64,7 @@ python sample.py --k 1 --lam 10.0 --num-samples 20000
 python sample.py --k 8 --lam 10.0
 python sample.py --k 1 --lam 10.0 --sigma-damp 0.2 --num-samples 20000
 python make_main_figure.py
-python plot.py --bon-vs-softmax --lam 10.0       # produces bon_reward_vs_n.pdf
+python plot.py --plots bon_paper --lam 10.0       # produces bon_reward_vs_n.pdf
 
 # FLUX (one figure at a time; see "FLUX figures" section below)
 cd flux/
@@ -179,7 +179,7 @@ python sample.py --k 1 --lam 10.0 --sigma-damp 0.2 --num-samples 20000
 python make_main_figure.py           # ../figures/checkerboard/main_figure.{pdf,png}
 
 # (4) Render the best-of-n vs softmax-of-n curve (paper appendix figure).
-python plot.py --bon-vs-softmax --lam 10.0       # ../figures/checkerboard/bon_reward_vs_n.pdf
+python plot.py --plots bon_paper --lam 10.0       # ../figures/checkerboard/bon_reward_vs_n.pdf
 ```
 
 `checkerboard/plot.py` is a multi-mode diagnostic plotting script with many other modes (per-method scatter, lambda sweeps, damping sweeps, etc.). Run `python plot.py --help` for the full list.

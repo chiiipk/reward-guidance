@@ -95,7 +95,7 @@ python sample.py --k 1 --lam 10.0 --num-samples 20000
 python sample.py --k 8 --lam 10.0 --num-samples 5000
 python sample.py --k 1 --lam 10.0 --sigma-damp 0.2 --num-samples 20000
 python make_main_figure.py
-python plot.py --bon-vs-softmax --lam 10.0
+python plot.py --plots bon_paper --lam 10.0
 cd ..
 
 # ──────────────────────────────────────────────────────────────────────────────
