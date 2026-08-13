@@ -235,7 +235,7 @@ class GuidedSampler(nn.Module):
         return -(lam_eff * self.reward_fn(x_curr))
 
     def vector_field(self, x, t, method="plugin", k_particles=1, fmrg_inner_steps=50):
-        """Compute the guided vector field b_t + (scale * grad log h_t or u_t^FMRG).
+        r"""Compute the guided vector field b_t + (scale * grad log h_t or u_t^FMRG).
 
         Args:
             method: "analytic" (closed-form, quadratic reward only),
