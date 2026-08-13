@@ -69,7 +69,8 @@ def _analytic_tilt(x_grid, mu, sigma, lam, R=10.0):
     log_t = lam * log_r + np.log(rho + 1e-300)
     log_t -= log_t.max()
     t = np.exp(log_t)
-    t /= np.trapz(t, x_grid)
+    integral = np.trapezoid(t, x_grid) if hasattr(np, 'trapezoid') else np.trapz(t, x_grid)
+    t /= integral
     return rho, t
 
 
