@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
 # ==============================================================================
 # project_command.sh — Reproduce toàn bộ paper + so sánh second-order
@@ -18,60 +18,40 @@ set -e
 # ==============================================================================
 
 EXPORT_DIR="export_results"
-FLUX_COMMON="--num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 --num-images 20"
-
-# Chỉ định chạy trên GPU 6 và 7
-export CUDA_VISIBLE_DEVICES="6,7"
+FLUX_COMMON="--num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --num-images 20"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLUX_COMMAND_FILE="$REPO_ROOT/flux/flux_commands.txt"
+export FLUX_COMMAND_FILE
+cd "$REPO_ROOT"
 
 # Mảng chứa các lệnh chạy FLUX để sau đó phân bổ song song cho các GPU
-rm -f flux/flux_commands.txt
+: > "$FLUX_COMMAND_FILE"
+trap 'rm -f -- "$FLUX_COMMAND_FILE"' EXIT
 
 # Helper: lưu 1 condition cho 1 figure vào file thay vì chạy ngay
 run_flux() {
     local FIGURE=$1; shift
     local CONDITION=$1; shift
     local OUTDIR="../data/${FIGURE}/${CONDITION}"
-    # Lưu command thành chuỗi để Python đọc và phân bổ GPU sau
-    echo "python sample.py $@ --output-dir $OUTDIR" >> flux_commands.txt
+    local CMD=(python sample.py "$@" --output-dir "$OUTDIR")
+    # Preserve prompt/question arguments containing spaces or apostrophes.
+    printf '%q ' "${CMD[@]}" >> "$FLUX_COMMAND_FILE"
+    printf '\n' >> "$FLUX_COMMAND_FILE"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. CÀI ĐẶT MÔI TRƯỜNG
 # ──────────────────────────────────────────────────────────────────────────────
 echo "=== 1. Cài đặt môi trường ==="
-
-cat << 'EOF' > pyproject.toml
-[project]
-name = "reward-guidance"
-version = "0.1.0"
-description = "Reward Guidance — full paper reproduction"
-readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.2",
-    "torchvision",
-    "numpy>=1.24",
-    "scipy>=1.10",
-    "matplotlib>=3.7",
-    "pillow>=10.0",
-    "tqdm>=4.65",
-    "diffusers>=0.30",
-    "transformers>=4.44",
-    "accelerate>=0.30",
-    "sentencepiece",
-    "protobuf",
-    "image-reward",
-    "openai-clip"
-]
-EOF
-
-if ! command -v uv &> /dev/null; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.cargo/bin:$PATH"
+if ! command -v python >/dev/null 2>&1; then
+    echo "Không tìm thấy Python trong môi trường hiện tại." >&2
+    echo "Hãy tạo virtual environment và chạy: pip install -r requirements.txt" >&2
+    exit 1
 fi
-uv venv
-source .venv/bin/activate
-uv pip install -r pyproject.toml
+python -c "import diffusers, torch, transformers" || {
+    echo "Thiếu dependency. Chạy: pip install -r requirements.txt" >&2
+    exit 1
+}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. GAUSSIAN MIXTURE (CPU, ~10s)
@@ -367,30 +347,19 @@ run_flux fmrg_blueness_dragon dragon_fmrg \
     --num-steps 28 --height 512 --width 512 --cfg-scale 3.5 \
     --num-guidance-steps 5 --guidance-start-step 1 --reward-scale 1 --num-images 20
 
-# Render tất cả figures
-echo "  --- Rendering all figures ---"
-for fig in ../figures/*/; do
-    if [ -f "$fig/regenerate.py" ]; then
-        echo "    Rendering $(basename $fig)..."
-        (cd "$fig" && python regenerate.py) || echo "    WARNING: $(basename $fig) failed"
-    fi
-done
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 6. FLUX SECOND-ORDER (OURS) — apple-to-apple trên 3 prompt ImageReward
-#    Chỉ ImageReward hỗ trợ second-order (cần supports_features)
+#    Chạy ImageReward, một trong các reward hỗ trợ feature-space Hessian.
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "=== 6. FLUX Second-Order (ours) ==="
 
-for LABEL_PROMPT_DAMP in \
-    "archaeologist|$ARCH_PROMPT|0.15" \
-    "miner|$MINER_PROMPT|0.10" \
-    "market|$MARKET_PROMPT|0.05"; do
+for LABEL_PROMPT in \
+    "archaeologist|$ARCH_PROMPT" \
+    "miner|$MINER_PROMPT" \
+    "market|$MARKET_PROMPT"; do
 
-    LABEL=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f1)
-    PROMPT=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f2)
-    DAMP=$(echo "$LABEL_PROMPT_DAMP" | cut -d'|' -f3)
+    IFS='|' read -r LABEL PROMPT <<< "$LABEL_PROMPT"
 
     # 6a. Second-Order, GNS=50 (apple-to-apple with plugin GNS=50)
     run_flux "imagereward_${LABEL}" "2nd_order_gns50" \
@@ -416,76 +385,125 @@ for LABEL_PROMPT_DAMP in \
 
 done
 
-echo "  --- Đang chạy TẤT CẢ $(wc -l < flux_commands.txt | tr -d ' ') thí nghiệm FLUX song song trên các GPU ---"
+echo "  --- Đang chạy TẤT CẢ $(wc -l < "$FLUX_COMMAND_FILE" | tr -d ' ') thí nghiệm FLUX song song trên các GPU ---"
 python3 << 'PYEOF'
-import subprocess, os, sys, threading
+import os
+import queue
+import re
+import shlex
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 def get_available_gpus():
     env_gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
     if env_gpus:
-        # User specified GPUs like "6,7"
+        # Respect Slurm/container visibility (indices or GPU UUIDs).
         return [g.strip() for g in env_gpus.split(",") if g.strip()]
     try:
-        # Fallback: get all GPUs
-        num = len(subprocess.check_output(['nvidia-smi', '-L']).decode('utf-8').strip().split('\n'))
+        output = subprocess.check_output(['nvidia-smi', '-L'], text=True).strip()
+        num = len([line for line in output.splitlines() if line.strip()])
         return [str(i) for i in range(num)]
-    except:
-        return ["0"]
+    except (OSError, subprocess.CalledProcessError):
+        return []
 
 available_gpus = get_available_gpus()
 num_gpus = len(available_gpus)
+if not available_gpus:
+    sys.exit("[Dispatcher] Không tìm thấy GPU khả dụng.")
 print(f"  [Dispatcher] Tìm thấy {num_gpus} GPU ({','.join(available_gpus)}). Bắt đầu phân bổ lệnh...")
 
-with open('flux_commands.txt', 'r') as f:
+with open(os.environ["FLUX_COMMAND_FILE"], "r") as f:
     commands = [line.strip() for line in f if line.strip()]
 
-gpu_lock = threading.Lock()
+gpu_queue = queue.Queue()
+for gpu in available_gpus:
+    gpu_queue.put(gpu)
+
+log_dir = Path("logs/flux")
+log_dir.mkdir(parents=True, exist_ok=True)
 
 def run_cmd(cmd):
-    with gpu_lock:
-        gpu_id = available_gpus.pop(0)
-    
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    
-    print(f"  [GPU {gpu_id}] Đang chạy: {cmd.split('--output-dir ')[-1]}")
-    # Chạy ẩn output để console đỡ rối
-    subprocess.run(cmd, shell=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-    
-    with gpu_lock:
-        available_gpus.append(gpu_id)
+    argv = shlex.split(cmd)
+    try:
+        outdir = argv[argv.index("--output-dir") + 1]
+    except (ValueError, IndexError):
+        outdir = f"job_{abs(hash(cmd))}"
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", outdir).strip("_")
+    log_path = log_dir / f"{slug}.log"
+    gpu_id = gpu_queue.get()
+    try:
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        print(f"  [GPU {gpu_id}] Đang chạy: {outdir} (log: {log_path})")
+        with log_path.open("w") as log_file:
+            proc = subprocess.run(
+                argv, env=env, stdout=log_file, stderr=subprocess.STDOUT,
+                check=False,
+            )
+        return proc.returncode, outdir, log_path
+    finally:
+        gpu_queue.put(gpu_id)
 
 with ThreadPoolExecutor(max_workers=num_gpus) as executor:
-    executor.map(run_cmd, commands)
+    results = list(executor.map(run_cmd, commands))
+
+failed = [result for result in results if result[0] != 0]
+if failed:
+    print(f"\n[Dispatcher] {len(failed)}/{len(results)} lệnh thất bại:", file=sys.stderr)
+    for returncode, outdir, log_path in failed:
+        print(f"  rc={returncode}  {outdir}  log={log_path}", file=sys.stderr)
+        try:
+            tail = log_path.read_text(errors="replace").splitlines()[-20:]
+            print("\n".join(f"    {line}" for line in tail), file=sys.stderr)
+        except OSError:
+            pass
+    sys.exit(1)
 PYEOF
 
 echo "  --- Hoàn thành chạy song song. Đang xử lý Bo4 ---"
 # Pick top 20 cho Bo4 sau khi tất cả ảnh đã gen xong
 for LABEL in "archaeologist" "miner" "market"; do
-    python3 << PYEOF
-import os, shutil, numpy as np
-src = '../data/imagereward_${LABEL}/2nd_order_bo4_raw'
-dst = '../data/imagereward_${LABEL}/2nd_order_bo4'
-if not os.path.exists(src):
-    exit(0)
-os.makedirs(dst, exist_ok=True)
-rewards = np.load(os.path.join(src, 'rewards.npy'))
+python3 << PYEOF
+from pathlib import Path
+import shutil
+import numpy as np
+
+condition = Path('../data/imagereward_${LABEL}/2nd_order_bo4_raw')
+run_dirs = [p.parent for p in condition.rglob('rewards.npy')]
+if len(run_dirs) != 1:
+    raise RuntimeError(f'Expected one completed Bo4 run under {condition}, found {len(run_dirs)}')
+src = run_dirs[0]
+dst = Path('../data/imagereward_${LABEL}/2nd_order_bo4') / src.name
+dst.mkdir(parents=True, exist_ok=True)
+rewards = np.load(src / 'rewards.npy')
 top_idx = np.argsort(rewards)[-20:][::-1]
 top_r = []
 for rank, idx in enumerate(top_idx):
-    s = os.path.join(src, f'{idx:04d}.png')
-    d = os.path.join(dst, f'{rank:04d}.png')
-    if os.path.exists(s): shutil.copy2(s, d)
+    s = src / f'{idx:04d}.png'
+    d = dst / f'{rank:04d}.png'
+    if not s.exists():
+        raise FileNotFoundError(s)
+    shutil.copy2(s, d)
     top_r.append(float(rewards[idx]))
-np.save(os.path.join(dst, 'rewards.npy'), np.array(top_r))
-meta = os.path.join(src, 'metadata.txt')
-if os.path.exists(meta):
-    shutil.copy2(meta, os.path.join(dst, 'metadata.txt'))
-    with open(os.path.join(dst, 'metadata.txt'), 'a') as f:
+np.save(dst / 'rewards.npy', np.array(top_r))
+meta = src / 'metadata.txt'
+if meta.exists():
+    shutil.copy2(meta, dst / 'metadata.txt')
+    with (dst / 'metadata.txt').open('a') as f:
         f.write(f'\n--- Bo4 ---\norig={len(rewards)} sel=20 mean_sel={np.mean(top_r):+.4f} mean_all={np.mean(rewards):+.4f}\n')
 print(f'  Bo4 {src}: all={np.mean(rewards):+.4f} top20={np.mean(top_r):+.4f}')
 PYEOF
+done
+
+# Render only after every condition has completed successfully.
+echo "  --- Rendering all figures ---"
+for fig in ../figures/*/; do
+    if [ -f "$fig/regenerate.py" ]; then
+        echo "    Rendering $(basename "$fig")..."
+        (cd "$fig" && python regenerate.py) || echo "    WARNING: $(basename "$fig") failed"
+    fi
 done
 
 cd ..

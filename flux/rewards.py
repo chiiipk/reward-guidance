@@ -5,6 +5,9 @@ Learned rewards: ImageReward (BLIP-based scorer made differentiable),
                  Skywork-VL (VLM yes/no probe made differentiable).
 """
 
+from collections.abc import Callable
+from typing import Union
+
 import torch
 import torch.nn.functional as F
 
@@ -13,7 +16,7 @@ DEFAULT_PROMPT = "a baby fox wearing a cozy knitted sweater"
 # BLIP preprocessing constants (also used by Skywork-VL because it inherits
 # the OpenAI/CLIP image normalization).
 _BLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
-_BLIP_STD  = [0.26862954, 0.26130258, 0.27577711]
+_BLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 
 
 # ---------------------------------------------------------------------------
@@ -41,14 +44,15 @@ def reward_blue_minus_half_rg(image: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-def make_circle_mask(h: int, w: int, cx: int, cy: int, r: int,
-                      device: str = "cuda") -> torch.Tensor:
+def make_circle_mask(
+    h: int, w: int, cx: int, cy: int, r: int, device: str = "cuda"
+) -> torch.Tensor:
     yy, xx = torch.meshgrid(
         torch.arange(h, device=device, dtype=torch.float32),
         torch.arange(w, device=device, dtype=torch.float32),
         indexing="ij",
     )
-    return ((yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2).float().unsqueeze(0)
+    return ((yy - cy) ** 2 + (xx - cx) ** 2 < r**2).float().unsqueeze(0)
 
 
 def reward_masked(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -110,31 +114,31 @@ def make_palette_reward_fn(target_rgb: Union[str, list[float]]) -> Callable:
     """
     if isinstance(target_rgb, str):
         target_rgb = PALETTES[target_rgb]
-    
+
     target_tensor = torch.tensor(target_rgb, dtype=torch.float32).view(1, 3)
 
     def reward_fn(image: torch.Tensor, return_features: bool = False):
         z = image.mean(dim=(2, 3))
-        
+
         def head_fn(z_in):
             t = target_tensor.to(z_in.device).to(z_in.dtype)
             return -((z_in - t) ** 2).sum(dim=-1)
-            
+
         score = head_fn(z)
         if return_features:
             return score, z, head_fn
         return score
-        
+
     reward_fn.supports_features = True
     return reward_fn
 
 
 # Named palettes for convenience.
 PALETTES = {
-    "warm_autumn":    [0.78, 0.42, 0.18],   # burnt orange
-    "cool_ocean":     [0.20, 0.40, 0.70],   # ocean blue
-    "rose_pink":      [0.90, 0.55, 0.70],   # rose
-    "forest_green":   [0.18, 0.50, 0.28],   # forest
+    "warm_autumn": [0.78, 0.42, 0.18],  # burnt orange
+    "cool_ocean": [0.20, 0.40, 0.70],  # ocean blue
+    "rose_pink": [0.90, 0.55, 0.70],  # rose
+    "forest_green": [0.18, 0.50, 0.28],  # forest
     "monochrome_gray": [0.50, 0.50, 0.50],
 }
 
@@ -159,9 +163,12 @@ def _shim_imagereward_imports():
        import time and would otherwise keep the old reference).
     """
     import transformers.pytorch_utils as tpu
+
     if not hasattr(tpu, "find_pruneable_heads_and_indices"):
+
         def _stub(heads, n_heads, head_size, already_pruned_heads):
             return set(), torch.tensor([], dtype=torch.long)
+
         tpu.find_pruneable_heads_and_indices = _stub
 
     import ImageReward.models.BLIP.blip as _b
@@ -198,8 +205,13 @@ def _shim_imagereward_imports():
             return list(head_mask)
         return [head_mask] * num_hidden_layers
 
-    for cls_name in ("BertModel", "BertLMHeadModel", "BertEncoder",
-                      "BertLayer", "BertAttention"):
+    for cls_name in (
+        "BertModel",
+        "BertLMHeadModel",
+        "BertEncoder",
+        "BertLayer",
+        "BertAttention",
+    ):
         cls = getattr(_med, cls_name, None)
         if cls is not None:
             cls.tie_weights = _noop_tie_weights
@@ -210,8 +222,13 @@ def load_imagereward(device: str = "cuda"):
     """Load ImageReward-v1.0; exposes .blip and .mlp for differentiable scoring."""
     _shim_imagereward_imports()
     import ImageReward as RM
+
     ir_model = RM.load("ImageReward-v1.0", device=device)
     ir_model.eval()
+    # We only need gradients with respect to the input image/features.  Freezing
+    # model parameters avoids allocating parameter-gradient buffers on the GPU.
+    for parameter in ir_model.parameters():
+        parameter.requires_grad_(False)
     return ir_model
 
 
@@ -226,8 +243,9 @@ def get_imagereward_text_input(ir_model, prompt: str, device: str):
     ).to(device)
 
 
-def reward_imagereward(image: torch.Tensor, text_input, ir_model,
-                       return_features: bool = False):
+def reward_imagereward(
+    image: torch.Tensor, text_input, ir_model, return_features: bool = False
+):
     """Score images with ImageReward while keeping gradients.
 
     image_tensor → resize/normalize → blip.visual_encoder → blip.text_encoder
@@ -238,14 +256,17 @@ def reward_imagereward(image: torch.Tensor, text_input, ir_model,
       - head_fn: callable z -> scalar, i.e. ir_model.mlp
     This enables second-order guidance via Woodbury on the MLP head's Hessian.
     """
-    img = F.interpolate(image, size=(224, 224), mode="bicubic",
-                        align_corners=False, antialias=True)
+    img = F.interpolate(
+        image, size=(224, 224), mode="bicubic", align_corners=False, antialias=True
+    )
     mean = torch.tensor(_BLIP_MEAN, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
     std = torch.tensor(_BLIP_STD, device=img.device, dtype=img.dtype).view(1, 3, 1, 1)
     img = (img - mean) / std
 
     image_embeds = ir_model.blip.visual_encoder(img)
-    image_atts = torch.ones(image_embeds.shape[:-1], dtype=torch.long, device=img.device)
+    image_atts = torch.ones(
+        image_embeds.shape[:-1], dtype=torch.long, device=img.device
+    )
 
     # BLIP text_encoder expects token-id batch matching image batch; tile if needed.
     B = img.shape[0]
@@ -267,8 +288,10 @@ def reward_imagereward(image: torch.Tensor, text_input, ir_model,
     score = ir_model.mlp(z_feat).squeeze(-1)
 
     if return_features:
+
         def head_fn(z_in):
             return ir_model.mlp(z_in).squeeze(-1)
+
         return score, z_feat, head_fn
     return score
 
@@ -278,9 +301,11 @@ def reward_imagereward(image: torch.Tensor, text_input, ir_model,
 # ---------------------------------------------------------------------------
 
 
-def load_skywork_vlm(model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct",
-                     device: str = "cuda",
-                     torch_dtype: torch.dtype = torch.bfloat16):
+def load_skywork_vlm(
+    model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct",
+    device: str = "cuda",
+    torch_dtype: torch.dtype = torch.bfloat16,
+):
     """Load Qwen2.5-VL-3B-Instruct as the VLM reward backbone.
 
     Skywork-VL-Reward-7B + FLUX exceeds 44 GB GPU memory; we fall back to
@@ -289,9 +314,16 @@ def load_skywork_vlm(model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct",
     next-token position. No value head, no trl, no gating.
     """
     from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True,
-    ).to(device).eval()
+
+    model = (
+        Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     for p in model.parameters():
@@ -300,8 +332,9 @@ def load_skywork_vlm(model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct",
     return model, processor
 
 
-def prepare_vlm_static_inputs(processor, question: str, answer: str,
-                               image_h: int, image_w: int, device: str):
+def prepare_vlm_static_inputs(
+    processor, question: str, image_h: int, image_w: int, device: str
+):
     """Pre-compute text tokenization + image-grid info once before sampling.
 
     Mirrors flux_old/flux_mode_selection/rewards.prepare_vlm_inputs:
@@ -312,17 +345,24 @@ def prepare_vlm_static_inputs(processor, question: str, answer: str,
     from PIL import Image
     from qwen_vl_utils import process_vision_info
 
-    _ = answer  # unused for yes/no setup, kept for API compatibility
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image",
-             "image": Image.fromarray(np.zeros((image_h, image_w, 3), dtype=np.uint8))},
-            {"type": "text", "text": question},
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": Image.fromarray(
+                        np.zeros((image_h, image_w, 3), dtype=np.uint8)
+                    ),
+                },
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
     text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True,
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
     image_inputs, _ = process_vision_info(messages)
     inputs = processor(text=[text], images=image_inputs, return_tensors="pt")
@@ -332,17 +372,17 @@ def prepare_vlm_static_inputs(processor, question: str, answer: str,
     no_ids = processor.tokenizer("No", add_special_tokens=False).input_ids
     thw = inputs["image_grid_thw"][0]
     return {
-        "input_ids":      inputs["input_ids"].to(device),
+        "input_ids": inputs["input_ids"].to(device),
         "attention_mask": inputs["attention_mask"].to(device),
         "image_grid_thw": inputs["image_grid_thw"].to(device),
-        "grid_t":         int(thw[0]),
-        "grid_h":         int(thw[1]),
-        "grid_w":         int(thw[2]),
-        "merge_size":     ip.merge_size,
-        "img_mean":       torch.tensor(ip.image_mean, dtype=torch.float32),
-        "img_std":        torch.tensor(ip.image_std, dtype=torch.float32),
-        "yes_token_id":   yes_ids[0],
-        "no_token_id":    no_ids[0],
+        "grid_t": int(thw[0]),
+        "grid_h": int(thw[1]),
+        "grid_w": int(thw[2]),
+        "merge_size": ip.merge_size,
+        "img_mean": torch.tensor(ip.image_mean, dtype=torch.float32),
+        "img_std": torch.tensor(ip.image_std, dtype=torch.float32),
+        "yes_token_id": yes_ids[0],
+        "no_token_id": no_ids[0],
     }
 
 
@@ -363,8 +403,13 @@ def reward_skywork_vh(image: torch.Tensor, model, static) -> torch.Tensor:
     target_h = grid_h * patch_size
     target_w = grid_w * patch_size
 
-    img = F.interpolate(image, size=(target_h, target_w),
-                          mode="bicubic", align_corners=False, antialias=True)
+    img = F.interpolate(
+        image,
+        size=(target_h, target_w),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True,
+    )
     mean = static["img_mean"].to(device).view(1, 3, 1, 1)
     std = static["img_std"].to(device).view(1, 3, 1, 1)
     img = (img - mean) / std
@@ -372,9 +417,15 @@ def reward_skywork_vh(image: torch.Tensor, model, static) -> torch.Tensor:
     img = img[0]
     frames = img.unsqueeze(0).expand(2, -1, -1, -1)
     patches = frames.reshape(
-        grid_t, 2, 3,
-        grid_h // merge, merge, patch_size,
-        grid_w // merge, merge, patch_size,
+        grid_t,
+        2,
+        3,
+        grid_h // merge,
+        merge,
+        patch_size,
+        grid_w // merge,
+        merge,
+        patch_size,
     )
     patches = patches.permute(0, 3, 6, 4, 7, 2, 1, 5, 8).contiguous()
     pixel_values = patches.reshape(n_patches, 3 * 2 * patch_size * patch_size)
@@ -388,11 +439,12 @@ def reward_skywork_vh(image: torch.Tensor, model, static) -> torch.Tensor:
         use_cache=False,
     )
     last_logits = out.logits[0, -1, :].float()
-    return (last_logits[static["yes_token_id"]]
-            - last_logits[static["no_token_id"]]).unsqueeze(0)
+    return (
+        last_logits[static["yes_token_id"]] - last_logits[static["no_token_id"]]
+    ).unsqueeze(0)
 
 
-REWARDS: dict[str, callable] = {
+REWARDS: dict[str, Callable] = {
     "blueness": reward_blueness,
     "blue_minus_rg": reward_blue_minus_rg,
     "blue_minus_half_rg": reward_blue_minus_half_rg,
@@ -404,52 +456,40 @@ REWARDS: dict[str, callable] = {
 
 def make_masked_reward_fn(image_h: int, image_w: int, region: str, device: str):
     """Build a reward_fn(image) closure for a named geometric mask region."""
-    if region == "topright_circle":
-        mask = make_circle_mask(image_h, image_w,
-                                  cx=int(0.75 * image_w), cy=int(0.25 * image_h),
-                                  r=int(0.18 * min(image_h, image_w)),
-                                  device=device)
-    elif region == "center_circle":
-        mask = make_circle_mask(image_h, image_w,
-                                  cx=image_w // 2, cy=image_h // 2,
-                                  r=int(0.20 * min(image_h, image_w)),
-                                  device=device)
-    elif region == "bottom_half":
-        mask = torch.zeros(1, image_h, image_w, device=device)
-        mask[:, image_h // 2:, :] = 1.0
-    else:
-        raise ValueError(f"unknown geometric region: {region}")
+    mask = _make_named_mask(image_h, image_w, region, device)
     return lambda image: reward_masked(image, mask)
 
 
-def make_masked_brightness_reward_fn(image_h: int, image_w: int, region: str,
-                                       device: str):
-    """Build a reward_fn(image) closure for masked-brightness on a region."""
+def _make_named_mask(image_h: int, image_w: int, region: str, device: str):
+    """Create one of the masks exposed by the FLUX CLI."""
     if region == "topright_circle":
-        mask = make_circle_mask(image_h, image_w,
-                                  cx=int(0.75 * image_w), cy=int(0.25 * image_h),
-                                  r=int(0.18 * min(image_h, image_w)),
-                                  device=device)
-    elif region == "center_circle":
-        mask = make_circle_mask(image_h, image_w,
-                                  cx=image_w // 2, cy=image_h // 2,
-                                  r=int(0.20 * min(image_h, image_w)),
-                                  device=device)
-    elif region == "bottom_half":
+        return make_circle_mask(
+            image_h,
+            image_w,
+            cx=int(0.75 * image_w),
+            cy=int(0.25 * image_h),
+            r=int(0.18 * min(image_h, image_w)),
+            device=device,
+        )
+    if region == "center_circle":
+        return make_circle_mask(
+            image_h,
+            image_w,
+            cx=image_w // 2,
+            cy=image_h // 2,
+            r=int(0.20 * min(image_h, image_w)),
+            device=device,
+        )
+    if region == "bottom_half":
         mask = torch.zeros(1, image_h, image_w, device=device)
-        mask[:, image_h // 2:, :] = 1.0
-    else:
-        raise ValueError(f"unknown geometric region: {region}")
+        mask[:, image_h // 2 :, :] = 1.0
+        return mask
+    raise ValueError(f"unknown geometric region: {region}")
+
+
+def make_masked_brightness_reward_fn(
+    image_h: int, image_w: int, region: str, device: str
+):
+    """Build a reward_fn(image) closure for masked-brightness on a region."""
+    mask = _make_named_mask(image_h, image_w, region, device)
     return lambda image: reward_masked_brightness(image, mask)
-
-
-def make_palette_reward_fn(palette_name_or_rgb):
-    """Build a reward_fn(image) closure for a target palette color."""
-    if isinstance(palette_name_or_rgb, str):
-        if palette_name_or_rgb not in PALETTES:
-            raise ValueError(f"unknown palette: {palette_name_or_rgb}; "
-                              f"available: {list(PALETTES)}")
-        rgb = PALETTES[palette_name_or_rgb]
-    else:
-        rgb = palette_name_or_rgb
-    return lambda image: reward_palette(image, rgb)

@@ -2,7 +2,7 @@ savefig.dpi: 400
 savefig.facecolor: white
 savefig.bbox: tight
 font.family: serif
-font.serif: CMU Serif
+font.serif: CMU Serif, DejaVu Serif
 font.size: 16
 mathtext.fontset: cm
 axes.axisbelow: True

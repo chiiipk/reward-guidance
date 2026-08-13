@@ -4,8 +4,13 @@ data/
 figures/**/*.pdf
 figures/**/*.png
 checkerboard/results/
+checkerboard/images/
 gaussian_mixture/results/
 mode_selection/results/
+flux/flux_commands.txt
+export_results/
+export_results.tar.gz
+reward_summary.json
 
 # Python
 __pycache__/
