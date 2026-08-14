@@ -48,7 +48,7 @@ if ! command -v uv >/dev/null 2>&1; then
     echo "Cài uv tại https://docs.astral.sh/uv/getting-started/installation/" >&2
     exit 1
 fi
-uv sync --frozen
+uv sync
 source .venv/bin/activate
 python -c "import diffusers, torch, transformers"
 
