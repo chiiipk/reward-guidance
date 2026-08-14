@@ -91,6 +91,14 @@ class GuidedFluxPipeline(FluxPipeline):
         device: str = "cuda",
     ) -> "GuidedFluxPipeline":
         """Load FLUX-1-dev, apply dual-time-embedder patch, load Flow Map LoRA."""
+        # Disable flash / mem-efficient SDPA so that the backward pass through
+        # the transformer uses the math-only kernel (pure PyTorch ops).  Flash
+        # and mem-efficient kernels are compiled via Triton JIT and their
+        # backward is broken on some CUDA-driver / torch / H200 combos,
+        # causing `cudaErrorIllegalAddress` inside `torch.autograd.grad`.
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+
         pipe = cls.from_pretrained(model_id, torch_dtype=torch_dtype)
         pipe.transformer = add_dual_time_embedder(pipe.transformer)
         pipe = pipe.to(device, torch_dtype)
