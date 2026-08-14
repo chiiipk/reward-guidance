@@ -95,7 +95,18 @@ class GuidedFluxPipeline(FluxPipeline):
         pipe.transformer = add_dual_time_embedder(pipe.transformer)
         pipe = pipe.to(device, torch_dtype)
         pipe.load_lora_weights(lora_source, weight_name=weight_name)
+        # Fuse LoRA into base weights so peft's forward hooks don't break
+        # torch.autograd.grad through the transformer (causes CUDA illegal
+        # memory access with some triton/peft combos).
+        try:
+            pipe.fuse_lora()
+            pipe.unload_lora_weights()
+        except Exception:
+            pass  # If fuse isn't supported, keep LoRA as-is
         pipe = pipe.to(device, torch_dtype)
+        # Enable gradient checkpointing to reduce peak VRAM during backward.
+        if hasattr(pipe.transformer, "enable_gradient_checkpointing"):
+            pipe.transformer.enable_gradient_checkpointing()
         return pipe
 
     def _run_transformer_dual(
