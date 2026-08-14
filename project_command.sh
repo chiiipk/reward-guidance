@@ -396,16 +396,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 def get_available_gpus():
-    env_gpus = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if env_gpus:
-        # Respect Slurm/container visibility (indices or GPU UUIDs).
-        return [g.strip() for g in env_gpus.split(",") if g.strip()]
-    try:
-        output = subprocess.check_output(['nvidia-smi', '-L'], text=True).strip()
-        num = len([line for line in output.splitlines() if line.strip()])
-        return [str(i) for i in range(num)]
-    except (OSError, subprocess.CalledProcessError):
-        return []
+    # Chỉ sử dụng GPU 6 và 7
+    return ["6", "7"]
 
 available_gpus = get_available_gpus()
 num_gpus = len(available_gpus)
