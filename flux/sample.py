@@ -12,7 +12,17 @@ import argparse
 import os
 
 import numpy as np
+
+# Triton invokes GCC at runtime to build its CUDA driver helper. Configure the
+# compiler and dynamic-loader paths before importing PyTorch/Triton so Linux
+# containers can find the host-mounted libcuda.so.1.
+from h200_runtime import configure_linux_libcuda_path, validate_h200_runtime
+
+configure_linux_libcuda_path()
+
 import torch
+
+validate_h200_runtime(torch)
 
 from pipeline import GuidedFluxPipeline
 from rewards import (
@@ -45,11 +55,13 @@ def _write_metadata(args, cache_dir: str):
             f"grad_divisor:           {args.grad_divisor:g}  "
             f"(rescaled grad = raw_grad / divisor)"
         )
-    else:
+    elif args.gradient_norm_scale is not None:
         lines.append(
             f"gradient_norm_scale:    {args.gradient_norm_scale}  "
             f"(rescaled grad has fixed L2 = gradient_norm_scale)"
         )
+    else:
+        lines.append("gradient_norm_scale:    disabled  (using raw gradient)")
     if args.sigma_damp is not None:
         lines.append(
             f"sigma_damp:             {args.sigma_damp:g}  "
@@ -165,6 +177,8 @@ def validate_args(args):
         raise ValueError("--snr-factor must be positive.")
     if args.grad_divisor is not None and args.grad_divisor <= 0.0:
         raise ValueError("--grad-divisor must be positive.")
+    if args.gradient_norm_scale is not None and args.gradient_norm_scale < 0.0:
+        raise ValueError("--gradient-norm-scale must be non-negative.")
     if args.num_particles < 1:
         raise ValueError("--num-particles must be at least 1.")
     if args.num_particles > 1 and args.gradient_norm_scale is None:
@@ -186,6 +200,11 @@ def validate_args(args):
 
 
 def main(args):
+    # Backward-compatible CLI convention: zero disables L2 normalization.
+    # Normalize it here as well as in the command-line entry point so callers
+    # invoking main(args) programmatically get identical semantics.
+    if args.gradient_norm_scale == 0.0:
+        args.gradient_norm_scale = None
     validate_args(args)
     torch.manual_seed(args.seed)
 
@@ -210,10 +229,17 @@ def main(args):
             f"_snr{args.snr_factor}_steps{args.num_guidance_steps}"
             f"_start{args.guidance_start_step}",
         )
-    else:
+    elif args.gradient_norm_scale is not None:
         cache_dir = os.path.join(
             args.output_dir,
             f"guided_{args.reward}_gns{args.gradient_norm_scale}"
+            f"_snr{args.snr_factor}_steps{args.num_guidance_steps}"
+            f"_start{args.guidance_start_step}",
+        )
+    else:
+        cache_dir = os.path.join(
+            args.output_dir,
+            f"guided_{args.reward}_raw"
             f"_snr{args.snr_factor}_steps{args.num_guidance_steps}"
             f"_start{args.guidance_start_step}",
         )
@@ -318,7 +344,7 @@ if __name__ == "__main__":
         "--gradient-norm-scale",
         type=float,
         default=10.0,
-        help="L2 norm to which the gradient is rescaled.",
+        help="Positive target L2 norm; pass 0 to keep the raw gradient.",
     )
     parser.add_argument(
         "--method",
@@ -384,6 +410,4 @@ if __name__ == "__main__":
     parser.add_argument("--model-id", type=str, default="black-forest-labs/FLUX.1-dev")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    if args.gradient_norm_scale <= 0.0:
-        args.gradient_norm_scale = None
     main(args)

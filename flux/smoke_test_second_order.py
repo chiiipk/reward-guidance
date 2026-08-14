@@ -154,11 +154,37 @@ class SmokePipe:
         return self.vae(x0, h, w)
 
 
+class LinearPipe:
+    """Three-dimensional graph with a closed-form Jacobian for grad checks."""
+
+    def __init__(self):
+        self.A = torch.tensor(
+            [[1.0, 0.2, -0.1], [0.1, 0.8, 0.3], [-0.2, 0.4, 1.1]],
+            dtype=torch.float32,
+        )
+
+    def _flow_map_x0(
+        self, z, sigma_t, prompt_embeds, pooled, text_ids, img_ids, guidance
+    ):
+        return z @ self.A.T
+
+    def _decode_packed(self, x0, h, w):
+        return x0[:, 0, :, None, None]
+
+
 def bind_real_methods(pipe):
     from pipeline import GuidedFluxPipeline
 
     SmokePipe._compute_grad_k1 = GuidedFluxPipeline._compute_grad_k1
     SmokePipe._compute_grad_second_order = GuidedFluxPipeline._compute_grad_second_order
+    return pipe
+
+
+def bind_linear_methods(pipe):
+    from pipeline import GuidedFluxPipeline
+
+    LinearPipe._compute_grad_k1 = GuidedFluxPipeline._compute_grad_k1
+    LinearPipe._compute_grad_second_order = GuidedFluxPipeline._compute_grad_second_order
     return pipe
 
 
@@ -186,6 +212,65 @@ def make_reward(rw, kind="clip"):
 
     fn.supports_features = True
     return fn
+
+
+def make_quadratic_reward():
+    """Concave quadratic reward with Hessian exactly -2I."""
+    target = torch.tensor([[0.2, -0.1, 0.4]], dtype=torch.float32)
+
+    def fn(image, return_features=False):
+        z = image.mean(dim=(2, 3))
+
+        def head_fn(z_in):
+            return -((z_in - target.to(z_in)) ** 2).sum(dim=-1)
+
+        score = head_fn(z)
+        return (score, z, head_fn) if return_features else score
+
+    fn.supports_features = True
+    return fn
+
+
+def make_linear_args(latents):
+    empty = torch.empty(0, dtype=latents.dtype)
+    return dict(
+        latents=latents,
+        sigma_value=0.35,
+        snr_factor=5.0,
+        reward_scale=1.3,
+        gradient_norm_scale=None,
+        height=1,
+        width=1,
+        prompt_embeds=empty,
+        pooled_prompt_embeds=empty,
+        text_ids=empty,
+        latent_image_ids=empty,
+        guidance=None,
+    )
+
+
+def linear_objective(pipe, reward_fn, latents, args, seed):
+    """Same fixed-noise scalar objective as _compute_grad_k1."""
+    sigma = args["sigma_value"]
+    sqrt_l = math.sqrt(args["snr_factor"])
+    sigma_prime = (sqrt_l * sigma) / (sqrt_l * sigma + 1.0 - sigma)
+    sigma_prime = min(sigma_prime, 0.9999)
+    scale = (1.0 - sigma_prime) / max(1.0 - sigma, 1e-8)
+    var_q = max(sigma_prime**2 - scale**2 * sigma**2, 1e-8)
+    generator = torch.Generator().manual_seed(seed)
+    eps = torch.randn(
+        latents.shape,
+        dtype=latents.dtype,
+        device=latents.device,
+        generator=generator,
+    )
+    sigma_t = torch.full(
+        (latents.shape[0],), sigma_prime, dtype=latents.dtype, device=latents.device
+    )
+    z = scale * latents + math.sqrt(var_q) * eps
+    x0 = pipe._flow_map_x0(z, sigma_t, *([torch.empty(0)] * 4), None)
+    image = pipe._decode_packed(x0, 1, 1).float()
+    return (reward_fn(image) * args["reward_scale"]).sum()
 
 
 # --------------------------------------------------------------- args chung
@@ -441,6 +526,131 @@ def t_saturation():
     ), "||g|| giam theo lam -> con thieu he so"
 
 
+def t_autograd_matches_backward_and_finite_difference():
+    """autograd.grad must match Tensor.backward and a numerical derivative."""
+    pipe = bind_linear_methods(LinearPipe())
+    reward_fn = make_quadratic_reward()
+    latents = torch.tensor([[[0.3, -0.4, 0.2]]], dtype=torch.float32)
+    args = make_linear_args(latents)
+    seed = 17
+
+    grad, _, _ = pipe._compute_grad_k1(
+        **args,
+        reward_fn=reward_fn,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+    x_backward = latents.clone().requires_grad_(True)
+    objective = linear_objective(pipe, reward_fn, x_backward, args, seed)
+    objective.backward()
+    backward_grad = x_backward.grad
+    backward_error = (grad - backward_grad).abs().max().item()
+    assert backward_error < 1e-7, f"autograd.grad != backward: {backward_error:.3e}"
+
+    direction = torch.tensor([[[0.2, -0.7, 0.4]]], dtype=torch.float32)
+    direction = direction / direction.norm()
+    step = 1e-2
+    with torch.no_grad():
+        f_plus = linear_objective(
+            pipe, reward_fn, latents + step * direction, args, seed
+        )
+        f_minus = linear_objective(
+            pipe, reward_fn, latents - step * direction, args, seed
+        )
+    finite_difference = ((f_plus - f_minus) / (2.0 * step)).item()
+    autodiff_directional = (grad * direction).sum().item()
+    fd_error = abs(finite_difference - autodiff_directional)
+    assert fd_error < 2e-5, (
+        f"autograd vs finite difference mismatch: {fd_error:.3e} "
+        f"({autodiff_directional:.6f} vs {finite_difference:.6f})"
+    )
+    print(
+        f"  max|autograd.grad-backward|={backward_error:.3e}  "
+        f"directional finite-difference error={fd_error:.3e}"
+    )
+
+
+def t_second_order_matches_dense_solve():
+    """Woodbury VJP implementation must equal the explicit dense inverse."""
+    from pipeline import posterior_variance
+
+    pipe = bind_linear_methods(LinearPipe())
+    reward_fn = make_quadratic_reward()
+    latents = torch.tensor([[[0.3, -0.4, 0.2]]], dtype=torch.float32)
+    args = make_linear_args(latents)
+    seed = 23
+    lam = 0.7
+
+    actual, _, _ = pipe._compute_grad_second_order(
+        **args,
+        reward_fn=reward_fn,
+        generator=torch.Generator().manual_seed(seed),
+        lam=lam,
+        k_eig=3,
+    )
+
+    sigma = args["sigma_value"]
+    sqrt_l = math.sqrt(args["snr_factor"])
+    sigma_prime = (sqrt_l * sigma) / (sqrt_l * sigma + 1.0 - sigma)
+    scale = (1.0 - sigma_prime) / (1.0 - sigma)
+    generator = torch.Generator().manual_seed(seed)
+    eps = torch.randn(latents.shape, generator=generator)
+    feature = (scale * latents + math.sqrt(
+        max(sigma_prime**2 - scale**2 * sigma**2, 1e-8)
+    ) * eps) @ pipe.A.T
+
+    target = torch.tensor([0.2, -0.1, 0.4], dtype=torch.float32)
+    jacobian = scale * pipe.A
+    feature_grad = -2.0 * (feature.flatten() - target)
+    beta = args["reward_scale"] * lam
+    first_order = beta * (jacobian.T @ feature_grad)
+    hessian = -2.0 * torch.eye(3)
+    c = beta * posterior_variance(sigma_prime)
+    dense_matrix = torch.eye(3) - c * jacobian.T @ hessian @ jacobian
+    expected = torch.linalg.solve(dense_matrix, first_order).view_as(actual)
+
+    error = (actual - expected).abs().max().item()
+    assert error < 2e-6, f"Woodbury != dense solve: {error:.3e}"
+    print(f"  max|Woodbury-dense|={error:.3e}")
+
+
+def t_zero_norm_cannot_silently_erase_gradient():
+    """Internal API must use None, never zero, for raw-gradient mode."""
+    from pipeline import rescale_gradient
+
+    grad = torch.tensor([3.0, 4.0])
+    assert rescale_gradient(grad, None, None) is grad
+    try:
+        rescale_gradient(grad, None, 0.0)
+    except ValueError as exc:
+        assert "positive or None" in str(exc)
+        print(f"  rejected ambiguous zero scale: {exc}")
+    else:
+        raise AssertionError("gradient_norm_scale=0 silently erased the gradient")
+
+
+def t_dual_time_embedder_supports_both_diffusers_signatures():
+    """Dual-time wrapper must work with and without guidance embeddings."""
+    from dual_time_embedder import DualTimeEmbedder
+
+    class RegularEmbedder(torch.nn.Module):
+        def forward(self, timestep, pooled):
+            return timestep[:, None] + pooled
+
+    class GuidanceEmbedder(torch.nn.Module):
+        def forward(self, timestep, guidance, pooled):
+            return timestep[:, None] + guidance[:, None] + pooled
+
+    timestep = torch.tensor([[0.8, 0.2]])
+    pooled = torch.tensor([[1.0, 2.0]])
+    guidance = torch.tensor([3.0])
+
+    regular = DualTimeEmbedder(RegularEmbedder())(timestep, pooled)
+    guided = DualTimeEmbedder(GuidanceEmbedder())(timestep, guidance, pooled)
+    assert torch.allclose(regular, torch.tensor([[1.5, 2.5]]))
+    assert torch.allclose(guided, torch.tensor([[4.5, 5.5]]))
+
+
 # =============================================================== main
 if __name__ == "__main__":
     print(f"torch {torch.__version__}  |  device: CPU  |  khong can FLUX weights\n")
@@ -459,6 +669,22 @@ if __name__ == "__main__":
     check("9. batch>1 bao loi ro rang", t_batch_assert)
     check("10. khong NaN o lam lon / sigma nho", t_no_nan)
     check("11. ||g|| tang roi bao hoa theo lam", t_saturation)
+    check(
+        "12. autograd.grad khop backward va finite difference",
+        t_autograd_matches_backward_and_finite_difference,
+    )
+    check(
+        "13. Woodbury VJP khop nghiem dense",
+        t_second_order_matches_dense_solve,
+    )
+    check(
+        "14. scale=0 khong duoc am tham xoa gradient",
+        t_zero_norm_cannot_silently_erase_gradient,
+    )
+    check(
+        "15. dual-time embedder ho tro ca hai Diffusers signatures",
+        t_dual_time_embedder_supports_both_diffusers_signatures,
+    )
 
     print(f"\n{'='*70}\nPASS {len(PASS)}  |  FAIL {len(FAIL)}\n{'='*70}")
     for n, e in FAIL:

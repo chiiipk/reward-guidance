@@ -10,17 +10,19 @@ Tài liệu này chứa các hướng dẫn chi tiết để thiết lập môi 
 
 ## 1. Thiết lập môi trường
 
-Chạy từ **root của repository**. Yêu cầu Python 3.10–3.12; khuyến nghị
-Python 3.11:
+Chạy từ **root của repository**. Môi trường đã được cố định ở Python 3.11,
+PyTorch 2.8.0 và CUDA 12.8:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh  # bỏ qua nếu đã có uv
-uv sync
+uv sync --frozen
 source .venv/bin/activate
 ```
 
 Không dùng `pip install -r requirements.txt`: dependency được quản lý tập trung
 trong `pyproject.toml`, còn `uv.lock` cố định phiên bản giữa máy local và H200.
+Không bỏ `--frozen` trên máy chạy thí nghiệm; nếu lockfile không khớp project,
+hãy cập nhật và review lockfile ở máy phát triển trước.
 
 Đăng nhập Hugging Face trước khi tải FLUX.1-dev:
 
@@ -31,8 +33,27 @@ huggingface-cli login
 Kiểm tra nhanh CLI và toán second-order trước khi tải model:
 
 ```bash
+python flux/h200_preflight.py
 python flux/sample.py --help
 cd flux && python smoke_test_second_order.py && cd ..
+```
+
+`h200_preflight.py` kiểm tra Python/PyTorch/CUDA, chạy một BF16 backward và ép
+Triton biên dịch helper liên kết với `libcuda.so.1`. Chỉ chạy batch đầy đủ sau
+khi dòng cuối là `H200 preflight: PASS`.
+
+Smoke test end-to-end tối thiểu (một ảnh 256×256) có thể chạy bằng. Đặt
+`H200_GPU` nếu tiến trình chưa được scheduler giới hạn sẵn GPU:
+
+```bash
+H200_GPU=6 bash flux/eval_pipelines/smoke_h200.sh
+```
+
+Khi chạy toàn bộ project, mặc định FLUX dùng GPU 6 và 7. Có thể đổi danh sách;
+script sẽ preflight từng H200 trước khi bắt đầu:
+
+```bash
+FLUX_GPUS=6,7 bash project_command.sh
 ```
 
 ## 2. Generate thử một ảnh trên H200

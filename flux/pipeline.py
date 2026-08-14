@@ -74,6 +74,30 @@ def vae_dtype(module: torch.nn.Module) -> torch.dtype:
     return torch.float32
 
 
+def rescale_gradient(
+    grad: torch.Tensor,
+    grad_divisor: Optional[float],
+    gradient_norm_scale: Optional[float],
+) -> torch.Tensor:
+    """Apply exactly one documented gradient scaling mode.
+
+    ``None`` means keep the raw autograd result. A non-positive target norm is
+    rejected instead of silently turning a guided run into an unguided one.
+    """
+
+    if grad_divisor is not None:
+        if grad_divisor <= 0.0:
+            raise ValueError("grad_divisor must be positive.")
+        return grad / grad_divisor
+    if gradient_norm_scale is None:
+        return grad
+    if gradient_norm_scale <= 0.0:
+        raise ValueError(
+            "gradient_norm_scale must be positive or None for an unnormalized gradient."
+        )
+    return grad / grad.norm().clamp_min(1e-8) * gradient_norm_scale
+
+
 class GuidedFluxPipeline(FluxPipeline):
     """Reward-guided FLUX flow-map pipeline.
 
@@ -109,9 +133,19 @@ class GuidedFluxPipeline(FluxPipeline):
         try:
             pipe.fuse_lora()
             pipe.unload_lora_weights()
-        except Exception:
-            pass  # If fuse isn't supported, keep LoRA as-is
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not fuse the Flow Map LoRA into the FLUX transformer. "
+                "Continuing with PEFT forward hooks is unsafe for the guided "
+                "autograd path; reinstall the locked environment with "
+                "`uv sync --frozen`."
+            ) from exc
         pipe = pipe.to(device, torch_dtype)
+        # Guidance differentiates only with respect to the latent input. Freeze
+        # model parameters so autograd does not retain or execute unnecessary
+        # parameter-gradient branches during the FLUX/VAE backward pass.
+        pipe.transformer.requires_grad_(False).eval()
+        pipe.vae.requires_grad_(False).eval()
         # Enable gradient checkpointing to reduce peak VRAM during backward.
         if hasattr(pipe.transformer, "enable_gradient_checkpointing"):
             pipe.transformer.enable_gradient_checkpointing()
@@ -263,11 +297,7 @@ class GuidedFluxPipeline(FluxPipeline):
             grad = torch.autograd.grad(objective, x_input, retain_graph=False)[0]
 
         raw_grad_norm = float(grad.norm().item())
-        if grad_divisor is not None:
-            grad = grad / grad_divisor
-        elif gradient_norm_scale is not None:
-            grad_norm = grad.norm().clamp_min(1e-8)
-            grad = grad / grad_norm * gradient_norm_scale
+        grad = rescale_gradient(grad, grad_divisor, gradient_norm_scale)
 
         return grad.detach(), float(reward.detach().mean().item()), raw_grad_norm
 
@@ -421,13 +451,7 @@ class GuidedFluxPipeline(FluxPipeline):
                 g_2nd = g_1st
 
             raw_grad_norm = float(g_2nd.norm().item())
-        if grad_divisor is not None:
-            grad = g_2nd / grad_divisor
-        elif gradient_norm_scale is not None:
-            grad_norm = g_2nd.norm().clamp_min(1e-8)
-            grad = g_2nd / grad_norm * gradient_norm_scale
-        else:
-            grad = g_2nd
+        grad = rescale_gradient(g_2nd, grad_divisor, gradient_norm_scale)
 
         return grad.detach(), float(score.detach().mean().item()), raw_grad_norm
 
@@ -437,7 +461,7 @@ class GuidedFluxPipeline(FluxPipeline):
         sigma_value: float,
         snr_factor: float,
         reward_scale: float,
-        gradient_norm_scale: float,
+        gradient_norm_scale: Optional[float],
         height: int,
         width: int,
         reward_fn: Callable[[torch.Tensor], torch.Tensor],
@@ -457,6 +481,11 @@ class GuidedFluxPipeline(FluxPipeline):
         before applying the softmax weights. With per-particle backprop and
         retain_graph=False the peak memory equals the k=1 case.
         """
+        if gradient_norm_scale is None or gradient_norm_scale <= 0.0:
+            raise ValueError(
+                "Multi-particle guidance requires a positive gradient_norm_scale."
+            )
+
         sqrt_l = math.sqrt(snr_factor)
         sigma_prime = (sqrt_l * sigma_value) / (
             sqrt_l * sigma_value + 1.0 - sigma_value
@@ -549,7 +578,7 @@ class GuidedFluxPipeline(FluxPipeline):
         # Reward-guidance kwargs ------------------------------------------------
         reward_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         reward_scale: float = 0.0,
-        gradient_norm_scale: float = 10.0,
+        gradient_norm_scale: Optional[float] = 10.0,
         snr_factor: float = 5.0,
         num_guidance_steps: int = 5,
         guidance_start_step: int = 1,
@@ -563,6 +592,10 @@ class GuidedFluxPipeline(FluxPipeline):
     ):
         if method not in {"plugin", "second_order"}:
             raise ValueError(f"Unknown guidance method: {method!r}")
+        if gradient_norm_scale is not None and gradient_norm_scale <= 0.0:
+            raise ValueError(
+                "gradient_norm_scale must be positive or None for an unnormalized gradient."
+            )
         if method == "second_order" and num_particles != 1:
             raise ValueError(
                 "Second-order guidance does not support --num-particles > 1."

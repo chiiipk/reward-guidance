@@ -24,7 +24,10 @@ source .venv/bin/activate
 ```
 
 `uv sync` creates `.venv` and installs the exact environment described by
-`pyproject.toml` and `uv.lock`. Use Python 3.10–3.12; Python 3.11 is recommended.
+`pyproject.toml` and `uv.lock`. The project uses Python 3.11. On Linux, uv
+installs the pinned PyTorch 2.8.0/CUDA 12.8 build required by the H200 runtime.
+For automated or remote runs, use `uv sync --frozen` so a stale lockfile fails
+immediately instead of silently changing the CUDA stack.
 
 The Gaussian-mixture, checkerboard, and 1D mode-selection experiments run on CPU or a single small GPU. The FLUX experiments require a single GPU with at least 48 GB of memory (we used an NVIDIA RTX A6000 or L40S); 24 GB is not sufficient even with gradient checkpointing.
 

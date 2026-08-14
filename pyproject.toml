@@ -3,7 +3,7 @@ name = "reward-guidance"
 version = "0.1.0"
 description = "Reward-guided flow matching experiments with FLUX second-order guidance"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "accelerate>=0.30",
     "diffusers>=0.30,<1",
@@ -19,11 +19,23 @@ dependencies = [
     "sentencepiece",
     # openai-clip/ImageReward still imports pkg_resources, removed in setuptools 81+.
     "setuptools<81",
-    "torch>=2.2",
-    "torchvision",
+    # Keep the H200 runtime on the CUDA 12.8 stack exercised by the smoke test.
+    # An open lower bound previously let uv resolve PyTorch 2.13/CUDA 13 and
+    # Triton 3.7, which crashed in FLUX's BF16 attention backward pass.
+    "torch==2.8.0",
+    "torchvision==0.23.0",
     "tqdm>=4.65",
     "transformers>=4.49,<5",
 ]
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128", marker = "sys_platform == 'linux'" }
+torchvision = { index = "pytorch-cu128", marker = "sys_platform == 'linux'" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

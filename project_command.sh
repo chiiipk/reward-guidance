@@ -14,14 +14,15 @@ set -Eeuo pipefail
 #   7. Tổng hợp kết quả → export_results/ (< 25MB)
 #
 # Cách chạy:   bash project_command.sh
-# Yêu cầu:     GPU ≥ 48GB, Python 3.10+, huggingface-cli login
+# Yêu cầu:     GPU ≥ 48GB, Python 3.11, huggingface-cli login
 # ==============================================================================
 
 EXPORT_DIR="export_results"
 FLUX_COMMON="--num-steps 28 --height 512 --width 512 --cfg-scale 3.5 --snr-factor 5 --num-guidance-steps 5 --guidance-start-step 1 --num-images 20"
+FLUX_GPUS="${FLUX_GPUS:-6,7}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLUX_COMMAND_FILE="$REPO_ROOT/flux/flux_commands.txt"
-export FLUX_COMMAND_FILE
+export FLUX_COMMAND_FILE FLUX_GPUS
 cd "$REPO_ROOT"
 
 # Mảng chứa các lệnh chạy FLUX để sau đó phân bổ song song cho các GPU
@@ -48,9 +49,36 @@ if ! command -v uv >/dev/null 2>&1; then
     echo "Cài uv tại https://docs.astral.sh/uv/getting-started/installation/" >&2
     exit 1
 fi
-uv sync
+uv sync --frozen
 source .venv/bin/activate
 python -c "import diffusers, torch, transformers"
+
+# H200 jobs are long and expensive. Validate every selected GPU before doing
+# any CPU experiments or dispatching FLUX workers.
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "Không tìm thấy nvidia-smi; không thể kiểm tra FLUX_GPUS=$FLUX_GPUS." >&2
+    exit 1
+fi
+IFS=',' read -r -a SELECTED_GPU_IDS <<< "$FLUX_GPUS"
+if [ "${#SELECTED_GPU_IDS[@]}" -eq 0 ]; then
+    echo "FLUX_GPUS không được để trống." >&2
+    exit 1
+fi
+for GPU_ID in "${SELECTED_GPU_IDS[@]}"; do
+    GPU_ID="${GPU_ID//[[:space:]]/}"
+    if [ -z "$GPU_ID" ]; then
+        echo "FLUX_GPUS không hợp lệ: '$FLUX_GPUS'." >&2
+        exit 1
+    fi
+    if ! GPU_NAME=$(nvidia-smi -i "$GPU_ID" --query-gpu=name --format=csv,noheader 2>/dev/null); then
+        echo "GPU $GPU_ID trong FLUX_GPUS=$FLUX_GPUS không tồn tại hoặc không truy cập được." >&2
+        exit 1
+    fi
+    echo "  GPU $GPU_ID: $GPU_NAME"
+    if [[ "$GPU_NAME" == *H200* ]]; then
+        CUDA_VISIBLE_DEVICES="$GPU_ID" python flux/h200_preflight.py
+    fi
+done
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. GAUSSIAN MIXTURE (CPU, ~10s)
@@ -396,8 +424,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 def get_available_gpus():
-    # Chỉ sử dụng GPU 6 và 7
-    return ["6", "7"]
+    return [gpu.strip() for gpu in os.environ["FLUX_GPUS"].split(",") if gpu.strip()]
 
 available_gpus = get_available_gpus()
 num_gpus = len(available_gpus)
